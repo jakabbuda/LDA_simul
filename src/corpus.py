@@ -148,12 +148,17 @@ class SyntheticCorpus:
                     final_map[t].append(w)
                     all_symbols.append(w)
 
-        stopwords = [f"stop{i}" for i in range(n_stopwords)]
-        all_symbols.extend(stopwords)
-        self.stopword_indices = []
-
+        # stopwords
+        if self.stopword_ratio > 0:
+            stopwords = [f"stop{i}" for i in range(n_stopwords)]
+            all_symbols.extend(stopwords)
+            self.stopword_indices = [all_symbols.index(s) for s in stopwords]
+        else:
+            self.stopword_indices = []
+            stopwords = []
         full_vocab = sorted(list(set(all_symbols)))
         self.stopword_indices = [full_vocab.index(s) for s in stopwords]
+
         return full_vocab, final_map
 
     def _init_beta_components(self, c_eff):
@@ -247,25 +252,29 @@ if __name__ == "__main__":
     lda_toy = SyntheticCorpus(
         n_docs=11, num_topics=3,
         text_len_params={"lam": 7},
-        stopword_ratio=0.0,
+        stopword_ratio=0.4,
         prev_effect_size=0, cont_effect_size=0, topic_correlation=0,
-        overlap_ratio=0.1, unstandard_ratio=0.2
+        overlap_ratio=0.2, unstandard_ratio=0.4,
+        vocab_size_per_topic=[10, 7, 3], n_stopwords=5
     )
     print("--- Toy 1: Simple LDA ---")
     print(lda_toy.get_data())
+    for k, v in lda_toy.get_gold_standard().items():
+        print(f"  {'-'*15} {k} {'-'*15}")
+        print(v)
 
-    # STM (correlation + covariates)
-    stm_toy = SyntheticCorpus(
-        n_docs=11, num_topics=3,
-        text_len_params={"lam": 7},
-        prev_effect_size=2.0,  # Strong prevalence effect
-        cont_effect_size=1.5,  # Strong content effect
-        topic_correlation=0.5,  # Correlated topics
-        n_groups_prev=2, n_groups_cont=2
-    )
-    print("\n--- Toy 2: STM ---")
-    print(stm_toy.get_data())
-
+    # # STM (correlation + covariates)
+    # stm_toy = SyntheticCorpus(
+    #     n_docs=11, num_topics=3,
+    #     text_len_params={"lam": 7},
+    #     prev_effect_size=2.0,  # Strong prevalence effect
+    #     cont_effect_size=1.5,  # Strong content effect
+    #     topic_correlation=0.5,  # Correlated topics
+    #     n_groups_prev=2, n_groups_cont=2
+    # )
+    # print("\n--- Toy 2: STM ---")
+    # print(stm_toy.get_data())
+    #
     # Markov (Transition Matrix provided)
     corr_m = np.array([
         [0.6, 0.3, 0.1],
@@ -280,15 +289,18 @@ if __name__ == "__main__":
     )
     print("\n--- Toy 3: Markov ---")
     print(markov_toy.get_data())
-
-    # Composite corpus (Bimodal/Unbalanced)
-    # 5 short docs with 2 topics, 6 long docs with 4 topics
-    composite_toy = SyntheticCorpus(
-        n_docs=[5, 6],
-        num_topics=[2, 4],
-        text_len_params=[{"lam": 5}, {"lam": 50}],
-        stopword_ratio=0.1  # Adding some noise to see the 'stop' symbols
-    )
-    print("\n--- Toy 4: Composite ---")
-    data = composite_toy.get_data()
-    print(data.groupby('subcorpus').agg({'text': lambda x: x.iloc[0][:50], 'prev_covar': 'count'}))
+    for k, v in markov_toy.get_gold_standard().items():
+        print(f"  {'-'*15} {k} {'-'*15}")
+        print(v)
+    #
+    # # Composite corpus (Bimodal/Unbalanced)
+    # # 5 short docs with 2 topics, 6 long docs with 4 topics
+    # composite_toy = SyntheticCorpus(
+    #     n_docs=[5, 6],
+    #     num_topics=[2, 4],
+    #     text_len_params=[{"lam": 5}, {"lam": 50}],
+    #     stopword_ratio=0.1  # Adding some noise to see the 'stop' symbols
+    # )
+    # print("\n--- Toy 4: Composite ---")
+    # data = composite_toy.get_data()
+    # print(data.groupby('subcorpus').agg({'text': lambda x: x.iloc[0][:50], 'prev_covar': 'count'}))
