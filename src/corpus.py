@@ -1,4 +1,3 @@
-import json
 import numpy as np
 import pandas as pd
 import string
@@ -20,10 +19,14 @@ class SyntheticCorpus:
                  cont_covar_imbal: Union[None, list] = None,
                  prev_effect_size: float = 0.0,
                  cont_effect_size: float = 0.0,
-                 topic_correlation: float = 0.0,  # TODO should be diff between topics
+                 topic_correlation: Union[float, np.ndarray] = 0.0,
                  stopword_ratio: float = 0.0,
+                 n_stopwords: int = 50,
+                 stopword_boost: float = 10.0,
+                 topic_signal_boost: float = 6.0,
                  overlap_ratio: float = 0.0,
                  unstandard_ratio: float = 0.0,
+                 max_variants: int = 3,
                  zipf_s: float = 1.1,
                  markov_matrix: Union[np.ndarray, None] = None):
         """
@@ -42,8 +45,12 @@ class SyntheticCorpus:
         :param cont_effect_size:
         :param topic_correlation:
         :param stopword_ratio:
+        :aparm n_stopwords:
+        :param stopword_boost:
+        :param topic_signal_boost:
         :param overlap_ratio:
         :param unstandard_ratio:
+        :aparm max_variants:
         :param zipf_s:
         :param markov_matrix:
         """
@@ -77,9 +84,12 @@ class SyntheticCorpus:
         self.zipf_s = zipf_s
         self.n_groups_prev = n_groups_prev
         self.n_groups_cont = n_groups_cont
+        # Signal control
+        self.stopword_boost = stopword_boost
+        self.topic_signal_boost = topic_signal_boost
 
         # Vocabulary & distribution
-        self.full_vocab, self.topic_to_symbols = self._build_vocab(overlap_ratio)
+        self.full_vocab, self.topic_to_symbols = self._build_vocab(overlap_ratio, n_stopwords, max_variants)
         self.v_size = len(self.full_vocab)
         self.word_to_idx = {w: i for i, w in enumerate(self.full_vocab)}
 
@@ -88,9 +98,12 @@ class SyntheticCorpus:
 
         # Prevalence (gamma) and topic covariance (Sigma)
         self.gamma = np.random.normal(0, prev_effect_size, (max_t, self.n_groups_prev))
-        self.sigma = np.eye(max_t) * 1.0
-        if max_t > 1:
-            self.sigma[self.sigma == 0] = topic_correlation
+        if isinstance(topic_correlation, np.ndarray):
+            self.sigma = topic_correlation
+        else:
+            self.sigma = np.eye(max_t) * 1.0
+            if max_t > 1:
+                self.sigma[self.sigma == 0] = topic_correlation
 
         # Markov setup
         if markov_matrix is not None:
@@ -105,7 +118,7 @@ class SyntheticCorpus:
     def _to_list(self, p):
         return p if isinstance(p, list) else [p] * self.n_subcorpora
 
-    def _build_vocab(self, overlap_ratio):
+    def _build_vocab(self, overlap_ratio, n_stopwords, max_variants):
         max_t = max(self.num_topics_list)
         topic_map = {t: [f"{string.ascii_lowercase[t % 26] * (t // 26 + 1)}{i}" for i in
                          range(self.vocab_size_per_topic[t])] for t in
@@ -127,35 +140,35 @@ class SyntheticCorpus:
         for t, words in topic_map.items():
             for w in words:
                 if np.random.random() < self.unstd_ratio:
-                    variants = [f"{w}_v{v}" for v in range(2)]  # TODO
+                    v_count = np.random.randint(2, max_variants + 1)
+                    variants = [f"{w}_v{v}" for v in range(v_count)]
                     final_map[t].extend(variants)
                     all_symbols.extend(variants)
                 else:
                     final_map[t].append(w)
                     all_symbols.append(w)
 
-        if self.stopword_ratio > 0:
-            stopwords = [f"stop{i}" for i in range(5)]  # TODO + are these actually more frequent
-            all_symbols.extend(stopwords)
-            self.stopword_indices = [all_symbols.index(s) for s in stopwords]
-        else:
-            self.stopword_indices = []
+        stopwords = [f"stop{i}" for i in range(n_stopwords)]
+        all_symbols.extend(stopwords)
+        self.stopword_indices = []
 
-        return sorted(list(set(all_symbols))), final_map
+        full_vocab = sorted(list(set(all_symbols)))
+        self.stopword_indices = [full_vocab.index(s) for s in stopwords]
+        return full_vocab, final_map
 
     def _init_beta_components(self, c_eff):
         ranks = np.arange(1, self.v_size + 1)
         self.m = np.log((1 / (ranks ** self.zipf_s)) / (1 / (ranks ** self.zipf_s)).sum())
         # Stopword head noise
         for idx in self.stopword_indices:
-            self.m[idx] += 10.0  # TODO?
+            self.m[idx] += self.stopword_boost
 
         max_t = max(self.num_topics_list)
         self.kappa_k = np.zeros((max_t, self.v_size))
         for t in range(max_t):
             for word in self.topic_to_symbols[t]:
                 if word in self.word_to_idx:
-                    self.kappa_k[t, self.word_to_idx[word]] = 5.0  # TODO
+                    self.kappa_k[t, self.word_to_idx[word]] = self.topic_signal_boost
 
         self.kappa_kg = np.random.normal(0, c_eff, (max_t, self.n_groups_cont, self.v_size))
 
@@ -207,6 +220,7 @@ class SyntheticCorpus:
         return {
             "vocab": self.full_vocab,
             "topic_to_symbols": self.topic_to_symbols,
+            "stopword_list": [self.full_vocab[i] for i in self.stopword_indices],
             "true_betas": true_betas,
             "true_thetas": self.ground_truth_theta,
             "metadata": self.metadata
