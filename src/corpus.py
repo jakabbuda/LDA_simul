@@ -254,6 +254,16 @@ class SyntheticCorpus:
         counts = Counter(all_tokens)
         to_keep = {w for w, c in counts.items() if c >= self.min_word_freq}
         self.documents = [[t for t in doc if t in to_keep] for doc in self.documents]
+        keep_indices = [self.word_to_idx[w] for w in self.full_vocab if w in to_keep]
+        # removing rare words from the baseline
+        self.m = self.m[keep_indices]
+        self.kappa_k = self.kappa_k[:, keep_indices]
+        self.kappa_kg = self.kappa_kg[:, :, keep_indices]
+        # rebuild the vocabulary
+        self.full_vocab = [self.full_vocab[i] for i in keep_indices]
+        self.v_size = len(self.full_vocab)
+        self.word_to_idx = {w: i for i, w in enumerate(self.full_vocab)}
+        self.stopwords = [s for s in self.stopwords if s in to_keep]
 
     def get_gold_standard(self):
         """
@@ -263,9 +273,9 @@ class SyntheticCorpus:
         true_betas = {}
         for g in range(self.n_groups_cont):
             true_betas[f"group_{g}"] = np.array([self._get_beta(t, g) for t in range(max_t)])
-        actual_vocab = sorted(list(set([t for doc in self.documents for t in doc])))
+        # actual_vocab = sorted(list(set([t for doc in self.documents for t in doc])))
         return {
-            "vocab": actual_vocab,
+            "vocab": self.full_vocab,
             "topic_to_symbols": self.topic_to_symbols,
             "stopword_list": self.stopwords,
             "true_betas": true_betas,
@@ -273,7 +283,7 @@ class SyntheticCorpus:
             "metadata": self.metadata
         }
 
-    def export_for_r(self, path_prefix="corpus"):
+    def export_for_r(self, path_prefix):
         docs_as_strings = [" ".join(doc) for doc in self.documents]
         vectorizer = CountVectorizer(vocabulary=self.full_vocab, token_pattern=r"(?u)\b\w+\b")
         dtm = vectorizer.transform(docs_as_strings)
@@ -282,6 +292,15 @@ class SyntheticCorpus:
         pd.DataFrame(self.metadata).to_csv(f"{path_prefix}_meta.csv", index=False)
         with open(f"{path_prefix}_config.json", 'w') as f:
             json.dump(self.config, f, indent=4)
+        theta_cols = [f"Topic_{i}" for i in range(max(self.num_topics_list))]
+        # col: topic; row: doc
+        pd.DataFrame(self.ground_truth_theta, columns=theta_cols).to_csv(f"{path_prefix}_true_thetas.csv", index=False)
+        max_t = max(self.num_topics_list)
+        for g in range(self.n_groups_cont):
+            beta_matrix = np.array([self._get_beta(t, g) for t in range(max_t)])
+            # col: words, rows: topics 1/content covar class
+            pd.DataFrame(beta_matrix, columns=self.full_vocab).to_csv(f"{path_prefix}_true_beta_group_{g}.csv",
+                                                                      index=False)
         print(f"Exported to {path_prefix}_dtm.csv, {path_prefix}_config.json and {path_prefix}_meta.csv")
 
     def get_data(self):
