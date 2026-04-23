@@ -243,7 +243,7 @@ run_full_eval <- function(simul_name,
   write.csv(m_lsa$dk, paste0(path_prefix_save, "lsi_theta.csv"), row.names = FALSE)
   write.csv(t(m_lsa$tk), paste0(path_prefix_save, "lsi_beta_overall.csv"), row.names = FALSE)
   
-  cat("\n--- Simulation suite complete, rsults saved to", path_prefix_save , "---\n")
+  cat("\n--- Simulations completed, results saved to", path_prefix_save , "---\n")
 }
 
 run_full_eval(simul_name = "trial01", searchk_range = 5, n_runs = 4)
