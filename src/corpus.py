@@ -7,6 +7,8 @@ import string
 from scipy.special import softmax
 from typing import List, Union, Callable
 
+from utils import markov_stationary
+
 
 class SyntheticCorpus:
     def __init__(self,
@@ -22,7 +24,8 @@ class SyntheticCorpus:
                  cont_covar_imbal: Union[None, list] = None,
                  prev_effect_size: float = 0.0,
                  cont_effect_size: float = 0.0,
-                 topic_correlation: Union[float, np.ndarray] = 0.0,
+                 topic_proportions: Union[None, list, np.ndarray] = None,
+                 topic_covar: Union[float, np.ndarray] = 0.0,
                  stopword_ratio: float = 0.0,
                  n_stopwords: int = 50,
                  min_word_freq: int = 1,
@@ -54,7 +57,10 @@ class SyntheticCorpus:
             should be None for balanced classes or list summing to 1 of length n_groups_cont for setting
         :param prev_effect_size: prevalence covariate effect size
         :param cont_effect_size: content covariate effect size
-        :param topic_correlation: topic correlation - can be defined by one number (same pairwise corr)
+        :param topic_proportions: proportions of topic in corpus
+            does not have effect ii markov mode if markov matrix is provided (in this case the sationary distribution of
+            the matrix defines the proportions)
+        :param topic_covar: topic covar - can be defined by one number (same pairwise corr)
             or with a covariance matrix
         :param stopword_ratio: ratio of stopwords (stop1, stop2, ...)
         :param n_stopwords: number of different stopwords
@@ -101,13 +107,19 @@ class SyntheticCorpus:
         self.n_groups_cont = n_groups_cont
         self.topic_signal_boost = topic_signal_boost
 
+        max_t = max(self.num_topics_list)
+        if topic_proportions is not None:
+            self.topic_proportions = np.array(topic_proportions) / sum(topic_proportions)
+        else:
+            self.topic_proportions = np.ones(max_t) / max_t
+
         # Vocabulary & distribution
         self.vocab_size_per_topic = vocab_size_per_topic if isinstance(vocab_size_per_topic, list) else [vocab_size_per_topic] * (num_topics if isinstance(num_topics, int) else sum(num_topics))
         self.full_vocab, self.topic_to_symbols, self.stopwords = self._build_vocab(overlap_ratio, n_stopwords, max_variants)
         self.v_size = len(self.full_vocab)
         self.word_to_idx = {w: i for i, w in enumerate(self.full_vocab)}
 
-        self._init_generative_params(cont_effect_size, prev_effect_size, topic_correlation, markov_matrix)
+        self._init_generative_params(cont_effect_size, prev_effect_size, topic_covar, markov_matrix)
 
         # execution
         self.documents, self.metadata, self.ground_truth_theta = [], [], []
@@ -159,7 +171,7 @@ class SyntheticCorpus:
         full_vocab = sorted(list(set(all_symbols)))
         return full_vocab, final_map, stopwords
 
-    def _init_generative_params(self, c_eff, p_eff, correlation, markov_m):
+    def _init_generative_params(self, c_eff, p_eff, covar, markov_m):
         ranks = np.arange(1, self.v_size + 1)
         # m: background freq - defined according zipfian disrib
         self.m = np.log((1 / (ranks ** self.zipf_s)) / (1 / (ranks ** self.zipf_s)).sum())
@@ -173,28 +185,34 @@ class SyntheticCorpus:
                                                                            self.topic_signal_boost/5)
 
         self.kappa_kg = np.random.normal(0, c_eff, (max_t, self.n_groups_cont, self.v_size))  # conetnt cov effect
+
+        self.base_mu = np.log(self.topic_proportions + 1e-10)  # base topic proportion
         self.gamma = np.random.normal(0, p_eff, (max_t, self.n_groups_prev))  # topic prevalence effect
-        if isinstance(correlation, np.ndarray):
-            self.sigma = correlation
+        if isinstance(covar, np.ndarray):
+            self.sigma = covar
         else:
             self.sigma = np.eye(max_t)
             if max_t > 1:
-                self.sigma[self.sigma == 0] = correlation
+                self.sigma[self.sigma == 0] = covar
 
         # markov_m: row_softmax(ln(global_markov) + N(0, p_eff)
         if markov_m is not None:
             base_markov_m = markov_m
         else:
-            base_markov_m = np.random.dirichlet([0.5] * max_t, max_t) * 0.5 + np.eye(max_t) * 0.5
+            dirichlet_alpha = self.topic_proportions * 10
+            base_markov_m = np.random.dirichlet(dirichlet_alpha, max_t) * 0.5 + np.eye(max_t) * 0.5
         # + prevalence effect
         self.markov_matrices = []
+        self.markov_stationary = []
         for g in range(self.n_groups_prev):
             if p_eff == 0:
                 self.markov_matrices.append(base_markov_m)
+                self.markov_stationary.append(markov_stationary(base_markov_m))
             else:
                 noise = np.random.normal(0, p_eff, (max_t, max_t))
-                perturbed_M = softmax(np.log(base_markov_m + 1e-10) + noise, axis=1)
-                self.markov_matrices.append(perturbed_M)
+                perturbed_m = softmax(np.log(base_markov_m + 1e-10) + noise, axis=1)
+                self.markov_matrices.append(perturbed_m)
+                self.markov_stationary.append(markov_stationary(perturbed_m))
 
     def _get_beta(self, t_idx, g_idx):
         # log_evidence(word v, topic k): score_v=m_v + kappa_k,v + kappa_g,v
@@ -210,13 +228,15 @@ class SyntheticCorpus:
             meta_p = np.zeros(self.n_groups_prev)
             meta_p[g_p] = 1
             # Slicing gamma to match n_t
-            mean_vec = np.dot(self.gamma[:n_t, :], meta_p)  # expected topic distr in group
+            mean_vec = np.dot(self.gamma[:n_t, :], meta_p) + self.base_mu[:n_t]  # expected topic distr in group
             cov_mat = self.sigma[:n_t, :n_t]
             eta = np.random.multivariate_normal(mean_vec, cov_mat)  # actual topic distr (log)
             theta = softmax(eta)
             doc_topic_list = np.random.choice(n_t, size=length, p=theta)
         else:  # markov
-            doc_topic_list = [np.random.choice(n_t)]
+            stat_dist = self.markov_stationary[g_p][:n_t]
+            stat_dist = stat_dist / stat_dist.sum()
+            doc_topic_list = [np.random.choice(n_t, p=stat_dist)]
             for _ in range(length - 1):
                 p = M[doc_topic_list[-1]][:n_t] / M[doc_topic_list[-1]][:n_t].sum()
                 doc_topic_list.append(np.random.choice(n_t, p=p))
@@ -276,7 +296,7 @@ class SyntheticCorpus:
             group_beta = np.array([self._get_beta(t, g) for t in range(max_t)])
             true_betas[f"group_{g}"] = group_beta
             true_beta_overall += group_beta * self.cont_covar_imbal[g]
-        true_betas[f"overall"] = group_beta
+        true_betas[f"overall"] = true_beta_overall
         # actual_vocab = sorted(list(set([t for doc in self.documents for t in doc])))
         return {
             "vocab": self.full_vocab,
@@ -318,12 +338,12 @@ class SyntheticCorpus:
 
 
 if __name__ == "__main__":
-    # simple LDA (no noise, no covariates, no correlation)
+    # simple LDA (no noise, no covariates, no covar)
     lda_toy = SyntheticCorpus(
         n_docs=100, num_topics=3,
         text_len_params={"lam": 50},
         stopword_ratio=0.5,
-        prev_effect_size=0, cont_effect_size=0, topic_correlation=0,
+        prev_effect_size=0, cont_effect_size=0, topic_covar=0,
         overlap_ratio=0.2, unstandard_ratio=0.4,
         vocab_size_per_topic=[10, 7, 3], n_stopwords=5,
         min_word_freq=2
@@ -335,13 +355,13 @@ if __name__ == "__main__":
     #     print(v)
     lda_toy.export_for_r('simul_data/trial00')
 
-    # # STM (correlation + covariates)
+    # # STM (covar + covariates)
     stm_toy = SyntheticCorpus(
         n_docs=100, num_topics=3,
         text_len_params={"lam": 50},
         prev_effect_size=2.0,  # Strong prevalence effect
         cont_effect_size=1.5,  # Strong content effect
-        topic_correlation=0.5,  # Correlated topics
+        topic_covar=0.5,  # Correlated topics
         n_groups_prev=2, n_groups_cont=2,
         min_word_freq=2
     )
@@ -358,7 +378,7 @@ if __name__ == "__main__":
     ])
     markov_toy = SyntheticCorpus(
         n_docs=100, num_topics=4,
-        vocab_size_per_topic = [100, 150, 200, 75],
+        vocab_size_per_topic=[100, 150, 200, 75],
         text_len_params={"lam": 50},
         generation_mode='markov',
         markov_matrix=corr_m, n_stopwords=5,
