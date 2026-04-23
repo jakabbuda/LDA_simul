@@ -1,4 +1,5 @@
 from collections import Counter
+import json
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer
@@ -67,6 +68,7 @@ class SyntheticCorpus:
         :param zipf_s: zipf distribution exponent param
         :param markov_matrix: markov transition between topics for mode 'markov'
         """
+        self.config = {k: str(v) if (callable(v) or isinstance(v, np.ndarray)) else v for k, v in locals().items() if k != 'self'}
 
         if text_len_params is None:
             text_len_params = {"lam": 100}
@@ -278,7 +280,9 @@ class SyntheticCorpus:
         # Save DTM as CSV
         pd.DataFrame(dtm.toarray(), columns=self.full_vocab).to_csv(f"{path_prefix}_dtm.csv", index=False)
         pd.DataFrame(self.metadata).to_csv(f"{path_prefix}_meta.csv", index=False)
-        print(f"Exported to {path_prefix}_dtm.csv and {path_prefix}_meta.csv")
+        with open(f"{path_prefix}_config.json", 'w') as f:
+            json.dump(self.config, f, indent=4)
+        print(f"Exported to {path_prefix}_dtm.csv, {path_prefix}_config.json and {path_prefix}_meta.csv")
 
     def get_data(self):
         docs_as_strings = [" ".join(doc) for doc in self.documents]
@@ -301,6 +305,7 @@ if __name__ == "__main__":
     # for k, v in lda_toy.get_gold_standard().items():
     #     print(f"  {'-'*15} {k} {'-'*15}")
     #     print(v)
+    lda_toy.export_for_r('trial00')
 
     # # STM (correlation + covariates)
     stm_toy = SyntheticCorpus(
@@ -314,6 +319,7 @@ if __name__ == "__main__":
     )
     print("\n--- Toy 2: STM ---")
     print(stm_toy.get_data())
+    stm_toy.export_for_r('trial01')
 
     # Markov (Transition Matrix provided)
     corr_m = np.array([
@@ -335,6 +341,7 @@ if __name__ == "__main__":
     # for k, v in markov_toy.get_gold_standard().items():
     #     print(f"  {'-'*15} {k} {'-'*15}")
     #     print(v)
+    markov_toy.export_for_r('trial02')
     #
     # Composite corpus (Bimodal/Unbalanced)
     # 5 short docs with 2 topics, 6 long docs with 4 topics
@@ -347,3 +354,4 @@ if __name__ == "__main__":
     print("\n--- Toy 4: Composite ---")
     data = composite_toy.get_data()
     print(data.groupby('subcorpus').agg({'text': lambda x: x.iloc[0][:50], 'prev_covar': 'count'}))
+    composite_toy.export_for_r('trial03')
