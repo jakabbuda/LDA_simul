@@ -28,7 +28,7 @@ class SyntheticCorpus:
                  topic_signal_boost: float = 6.0,
                  overlap_ratio: float = 0.0,
                  unstandard_ratio: float = 0.0,
-                 max_variants: int = 3,
+                 max_variants: int = 8,
                  zipf_s: float = 1.1,
                  markov_matrix: Union[np.ndarray, None] = None):
         """
@@ -179,10 +179,20 @@ class SyntheticCorpus:
             if max_t > 1:
                 self.sigma[self.sigma == 0] = correlation
 
+        # markov_m: row_softmax(ln(global_markov) + N(0, p_eff)
         if markov_m is not None:
-            self.markov_matrices = [markov_m] * self.n_groups_prev
+            base_markov_m = markov_m
         else:
-            self.markov_matrices = [np.random.dirichlet([0.5] * max_t, max_t) for _ in range(self.n_groups_prev)]
+            base_markov_m = np.random.dirichlet([0.5] * max_t, max_t) * 0.5 + np.eye(max_t) * 0.5
+        # + prevalence effect
+        self.markov_matrices = []
+        for g in range(self.n_groups_prev):
+            if p_eff == 0:
+                self.markov_matrices.append(base_markov_m)
+            else:
+                noise = np.random.normal(0, p_eff, (max_t, max_t))
+                perturbed_M = softmax(np.log(base_markov_m + 1e-10) + noise, axis=1)
+                self.markov_matrices.append(perturbed_M)
 
     def _get_beta(self, t_idx, g_idx):
         # log_evidence(word v, topic k): score_v=m_v + kappa_k,v + kappa_g,v
@@ -307,16 +317,17 @@ if __name__ == "__main__":
 
     # Markov (Transition Matrix provided)
     corr_m = np.array([
-        [0.6, 0.3, 0.1],
-        [0.1, 0.8, 0.1],
-        [0.1, 0.1, 0.8]
+        [0.8, 0.2, 0.0, 0.0],
+        [0.1, 0.8, 0.05, 0.05],
+        [0.1, 0.1, 0.79, 0.01],
+        [0.2, 0.05, 0.15, 0.6]
     ])
     markov_toy = SyntheticCorpus(
-        n_docs=11, num_topics=3,
-        text_len_params={"lam": 7},
+        n_docs=15, num_topics=4,
+        vocab_size_per_topic = [100, 150, 200, 75],
+        text_len_params={"lam": 81},
         generation_mode='markov',
-        markov_matrix=corr_m,
-        vocab_size_per_topic=[10, 7, 3], n_stopwords=5,
+        markov_matrix=corr_m, n_stopwords=5,
         stopword_ratio=0.2, unstandard_ratio=0.2, overlap_ratio=0.2
     )
     print("\n--- Toy 3: Markov ---")
