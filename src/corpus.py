@@ -271,8 +271,12 @@ class SyntheticCorpus:
         """
         max_t = max(self.num_topics_list)
         true_betas = {}
+        true_beta_overall = np.zeros((max_t, self.v_size))
         for g in range(self.n_groups_cont):
-            true_betas[f"group_{g}"] = np.array([self._get_beta(t, g) for t in range(max_t)])
+            group_beta = np.array([self._get_beta(t, g) for t in range(max_t)])
+            true_betas[f"group_{g}"] = group_beta
+            true_beta_overall += group_beta * self.cont_covar_imbal[g]
+        true_betas[f"overall"] = group_beta
         # actual_vocab = sorted(list(set([t for doc in self.documents for t in doc])))
         return {
             "vocab": self.full_vocab,
@@ -296,12 +300,17 @@ class SyntheticCorpus:
         # col: topic; row: doc
         pd.DataFrame(self.ground_truth_theta, columns=theta_cols).to_csv(f"{path_prefix}_true_thetas.csv", index=False)
         max_t = max(self.num_topics_list)
+        true_beta_overall = np.zeros((max_t, self.v_size))
         for g in range(self.n_groups_cont):
-            beta_matrix = np.array([self._get_beta(t, g) for t in range(max_t)])
+            group_beta = np.array([self._get_beta(t, g) for t in range(max_t)])
+            beta_matrix = group_beta
+            true_beta_overall += group_beta * self.cont_covar_imbal[g]
             # col: words, rows: topics 1/content covar class
             pd.DataFrame(beta_matrix, columns=self.full_vocab).to_csv(f"{path_prefix}_true_beta_group_{g}.csv",
                                                                       index=False)
-        print(f"Exported to {path_prefix}_dtm.csv, {path_prefix}_config.json and {path_prefix}_meta.csv")
+        pd.DataFrame(true_beta_overall, columns=self.full_vocab).to_csv(f"{path_prefix}_true_beta_overall.csv",
+                                                                        index=False)
+        print(f"Exported {5 + self.n_groups_cont} file as {path_prefix}... (_dtm.csv, _config.json, _meta.csv, _true_thetas.csv, _true_beta_overall.csv, _true_beta_group_#.csv)")
 
     def get_data(self):
         docs_as_strings = [" ".join(doc) for doc in self.documents]
@@ -311,8 +320,8 @@ class SyntheticCorpus:
 if __name__ == "__main__":
     # simple LDA (no noise, no covariates, no correlation)
     lda_toy = SyntheticCorpus(
-        n_docs=11, num_topics=3,
-        text_len_params={"lam": 7},
+        n_docs=100, num_topics=3,
+        text_len_params={"lam": 50},
         stopword_ratio=0.5,
         prev_effect_size=0, cont_effect_size=0, topic_correlation=0,
         overlap_ratio=0.2, unstandard_ratio=0.4,
@@ -324,12 +333,12 @@ if __name__ == "__main__":
     # for k, v in lda_toy.get_gold_standard().items():
     #     print(f"  {'-'*15} {k} {'-'*15}")
     #     print(v)
-    lda_toy.export_for_r('trial00')
+    lda_toy.export_for_r('simul_data/trial00')
 
     # # STM (correlation + covariates)
     stm_toy = SyntheticCorpus(
-        n_docs=11, num_topics=3,
-        text_len_params={"lam": 7},
+        n_docs=100, num_topics=3,
+        text_len_params={"lam": 50},
         prev_effect_size=2.0,  # Strong prevalence effect
         cont_effect_size=1.5,  # Strong content effect
         topic_correlation=0.5,  # Correlated topics
@@ -338,7 +347,7 @@ if __name__ == "__main__":
     )
     print("\n--- Toy 2: STM ---")
     print(stm_toy.get_data())
-    stm_toy.export_for_r('trial01')
+    stm_toy.export_for_r('simul_data/trial01')
 
     # Markov (Transition Matrix provided)
     corr_m = np.array([
@@ -348,9 +357,9 @@ if __name__ == "__main__":
         [0.2, 0.05, 0.15, 0.6]
     ])
     markov_toy = SyntheticCorpus(
-        n_docs=15, num_topics=4,
+        n_docs=100, num_topics=4,
         vocab_size_per_topic = [100, 150, 200, 75],
-        text_len_params={"lam": 81},
+        text_len_params={"lam": 50},
         generation_mode='markov',
         markov_matrix=corr_m, n_stopwords=5,
         stopword_ratio=0.2, unstandard_ratio=0.2, overlap_ratio=0.2
@@ -360,12 +369,12 @@ if __name__ == "__main__":
     # for k, v in markov_toy.get_gold_standard().items():
     #     print(f"  {'-'*15} {k} {'-'*15}")
     #     print(v)
-    markov_toy.export_for_r('trial02')
+    markov_toy.export_for_r('simul_data/trial02')
     #
     # Composite corpus (Bimodal/Unbalanced)
     # 5 short docs with 2 topics, 6 long docs with 4 topics
     composite_toy = SyntheticCorpus(
-        n_docs=[5, 6],
+        n_docs=[50, 50],
         num_topics=[2, 4],
         text_len_params=[{"lam": 5}, {"lam": 50}],
         stopword_ratio=0.1  # Adding some noise to see the 'stop' symbols
@@ -373,4 +382,4 @@ if __name__ == "__main__":
     print("\n--- Toy 4: Composite ---")
     data = composite_toy.get_data()
     print(data.groupby('subcorpus').agg({'text': lambda x: x.iloc[0][:50], 'prev_covar': 'count'}))
-    composite_toy.export_for_r('trial03')
+    composite_toy.export_for_r('simul_data/trial03')
