@@ -22,3 +22,21 @@ def match_topics(simulated_beta, recovered_beta):
     sim_ind, rec_ind = linear_sum_assignment(cost_matrix)
     # sim_ind[i] matches rec_ind[i]
     return list(zip(sim_ind, rec_ind))
+
+
+def make_uncorrelated_markov(self_transition_vec):
+    """
+    makes an n*n uncorrelated markov mtrx based on a vector of n dimension
+    representing self transition probab for each class
+    """
+    n = len(self_transition_vec)
+    trm_v = (1 - self_transition_vec) / (n - 1)
+    trm_mtr = np.vstack([trm_v] * n).T
+    np.fill_diagonal(trm_mtr, self_transition_vec)
+
+    return trm_mtr
+
+
+def gini_coeff(lst):
+    a = sorted(lst, reverse=True)
+    return 2 * sum([(len(a) - i) * v for i, v in enumerate(a)]) / (sum(a) * len(a)) - (len(a) + 1) / len(a)
