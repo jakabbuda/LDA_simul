@@ -310,7 +310,7 @@ class SyntheticCorpus:
 
     def export_for_r(self, path_prefix):
         if not os.path.exists(path_prefix):
-            os.mkdir(path_prefix)
+            os.makedirs(path_prefix)
         docs_as_strings = [" ".join(doc) for doc in self.documents]
         vectorizer = CountVectorizer(vocabulary=self.full_vocab, token_pattern=r"(?u)\b\w+\b")
         dtm = vectorizer.transform(docs_as_strings)
