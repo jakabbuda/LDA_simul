@@ -8,7 +8,7 @@ library(jsonlite)
 library(kneedle)
 
 # params to change for each simulated data
-setwd("D:/bj/documents/munk/analysis/LDA_simul/src")
+setwd("D:/bj/documents/munk/analysis/LDA_simul/")
 
 # maximum distance
 find_elbow <- function(k_values, metric_values, minimize = FALSE) {
@@ -72,7 +72,7 @@ run_full_eval <- function(simul_name,
                           searchk_range = 5,
                           n_runs = 5) {
   
-  path_prefix <- paste0("../simul_data/", simul_name)
+  path_prefix <- paste0("simul_data/", simul_name)
   path_prefix_save <- paste0(path_prefix, "/model_fits/")
   if (!dir.exists(path_prefix_save)) {
     dir.create(path_prefix_save, recursive = TRUE)
@@ -246,4 +246,12 @@ run_full_eval <- function(simul_name,
   cat("\n--- Simulations completed, results saved to", path_prefix_save , "---\n")
 }
 
-run_full_eval(simul_name = "trial01", searchk_range = 5, n_runs = 4)
+# run_full_eval(simul_name = "trial01", searchk_range = 5, n_runs = 4)
+for (tp in list.dirs('simul_data', recursive = F)) {
+  tps <- unlist(strsplit(tp, '/'))[length( unlist(strsplit(tp, '/')))]
+  for (cp in list.dirs(paste0('simul_data/', tps), recursive = F)) {
+    cps <- unlist(strsplit(cp, '/'))[length( unlist(strsplit(cp, '/')))]
+    mdln <- paste0(tps, '/', cps, '/')
+    run_full_eval(simul_name = mdln, searchk_range = 5, n_runs = 4)
+  }
+}
