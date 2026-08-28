@@ -222,7 +222,7 @@ run_full_eval <- function(simul_name,
     write.csv(posterior(m_ctm)$topics, paste0(run_dir, "/ctm_theta.csv"), row.names = FALSE)
     write.csv(posterior(m_ctm)$terms, paste0(run_dir, "/ctm_beta_overall.csv"), row.names = FALSE)
     
-    # STM
+    # STM  - TODO: move outside the loop (with spectral init it s deterministic)
     m_stm <- stm(
       documents = stm_data$documents, vocab = stm_data$vocab, K = best_k_stm,
       prevalence =~ prev_covar, content =~ content_covar, data = meta_df,
