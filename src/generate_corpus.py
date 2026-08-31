@@ -5,6 +5,7 @@ import numpy as np
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from corpus import SyntheticCorpus
 from utils import make_uncorrelated_markov
@@ -19,6 +20,8 @@ def parse_args():
                         help="Path to the JSON parameterization configuration file.")
     parser.add_argument("--output_base", type=str, default="simul_test01",
                         help="directory where corpora are saved")
+    parser.add_argument("--cores", type=int, default=1,
+                        help="number of CPU cores to use for parallelization")
     return parser.parse_args()
 
 def load_config(config_path):
@@ -44,7 +47,10 @@ def save_reproduction_log(output_dir, args_dict, config_path, corpus_info=True, 
             f.write("python3 " + " ".join(sys.argv) + "\n")
         os.chmod(os.path.join(output_dir, "reproduce_command.sh"), 0o755)
 
-def run_config_simulation(config_data, output_base, config_path):
+def worker_generate_single_run(params, output_dir, config_path):
+    generate_single_run(params, output_dir, config_path)
+
+def run_config_simulation(config_data, output_base, config_path, num_cores=1):
     base_params = config_data.get("base_parameters", {})
     grid_params = config_data.get("grid_parameters", {})
     
@@ -93,6 +99,8 @@ def run_config_simulation(config_data, output_base, config_path):
     print(f"combinations to generate: {total_runs}")
     start_time = time.time()
     
+    # prebuild tasks lists
+    tasks = []
     for idx, combo in enumerate(grid_value_combos):
         current_grid_params = dict(zip(grid_keys, combo))
         merged_params = {**base_params, **current_grid_params}
@@ -122,7 +130,7 @@ def run_config_simulation(config_data, output_base, config_path):
             group_folder = f"gini_{gini_val}"
         else:
             val = str(current_grid_params[grouping_key]).replace('.', 'p')
-            group_folder = f"{grouping_key.replace("_", "")}_{val}"
+            group_folder = f"{grouping_key.replace('_', '')}_{val}"
             
         subgroup_parts = []
         for sk in subgroup_keys:
@@ -130,15 +138,39 @@ def run_config_simulation(config_data, output_base, config_path):
                 subgroup_parts.append(f"gini_{gini_val}")
             else:
                 val = current_grid_params[sk]
-                subgroup_parts.append(f"{sk.replace("_", "")}_{val}")
+                subgroup_parts.append(f"{sk.replace('_', '')}_{val}")
                 
         subgroup_folder = "_".join(subgroup_parts) if subgroup_parts else "run"
         output_dir = os.path.join(output_base, group_folder, subgroup_folder)
+        
+        tasks.append((merged_params, output_dir, config_path, group_folder, subgroup_folder))
 
-        generate_single_run(merged_params, output_dir, config_path)
-        elapsed = int(np.round(time.time() - start_time))
-        estim_rest = int(np.round(elapsed / (idx + 1) * (total_runs - idx - 1)))
-        print(f"[{idx+1}/{total_runs}] Synthesizing to: {group_folder}/{subgroup_folder}...\ttime passed: {elapsed}, estimated remaining time: {estim_rest}")
+    # Run tasks in parallel or sequentially
+    if num_cores > 1:
+        print(f"Spawning parallel generator pool with {num_cores} processes...")
+        with ProcessPoolExecutor(max_workers=num_cores) as executor:
+            future_to_task = {
+                executor.submit(worker_generate_single_run, t[0], t[1], t[2]): (idx, t[3], t[4])
+                for idx, t in enumerate(tasks)
+            }
+            
+            for future in as_completed(future_to_task):
+                idx, group_folder, subgroup_folder = future_to_task[future]
+                try:
+                    future.result()
+                    elapsed = int(np.round(time.time() - start_time))
+                    print(f"[{idx+1}/{total_runs}] Synthesized to: {group_folder}/{subgroup_folder}...\ttime passed: {elapsed}s")
+                except Exception as exc:
+                    print(f"[{idx+1}/{total_runs}] Generated an exception: {exc}")
+                    raise exc
+    else:
+        # Sequential execution
+        for idx, t in enumerate(tasks):
+            merged_params, output_dir, config_path, group_folder, subgroup_folder = t
+            generate_single_run(merged_params, output_dir, config_path)
+            elapsed = int(np.round(time.time() - start_time))
+            estim_rest = int(np.round(elapsed / (idx + 1) * (total_runs - idx - 1)))
+            print(f"[{idx+1}/{total_runs}] Synthesizing to: {group_folder}/{subgroup_folder}...\ttime passed: {elapsed}, estimated remaining time: {estim_rest}")
 
 def generate_single_run(params, output_dir, config_path):
     corpus = SyntheticCorpus(
@@ -170,5 +202,5 @@ def generate_single_run(params, output_dir, config_path):
 if __name__ == "__main__":
     args = parse_args()
     config_data = load_config(args.config)
-    run_config_simulation(config_data, args.output_base, args.config)
+    run_config_simulation(config_data, args.output_base, args.config, num_cores=args.cores)
     print("\n corpus generation done")

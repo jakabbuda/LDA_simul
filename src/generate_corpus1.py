@@ -1,3 +1,5 @@
+# test run - not needed for the current version
+
 import numpy as np
 
 from corpus import SyntheticCorpus
@@ -53,7 +55,7 @@ for mw_fr in [1, 5]:
                      [0.34482759, 0.22988506, 0.17241379, 0.13793103, 0.11494253],  # gini: 22
                      [0.4379562, 0.2189781, 0.1459854, 0.10948905, 0.08759124],  # gini: 32
                      [0.55950266, 0.18650089, 0.11190053, 0.07992895, 0.06216696]]  # gini: 44
-    markov_mtr_l = [make_uncorrelated_markov(np.array([0.98, 0.976, 0.972, 0.968, 0.964])),  # gini: 12
+    markov_mtr_l = [make_uncorrelated_markov(np.array([0.98, 0.976, 0.972, 0.968, 0.964])),  # gini: 12  # gini_coeff(markov_stationary(make_uncorrelated_markov(np.array([0.98, 0.976, 0.972, 0.968, 0.964]))))
                     make_uncorrelated_markov(np.array([0.98, 0.975, 0.97, 0.965, 0.96])),  # gini: 14
                     make_uncorrelated_markov(np.array([0.98, 0.972, 0.964, 0.956, 0.948])),  # gini: 19
                     make_uncorrelated_markov(np.array([0.98, 0.97, 0.96, 0.95, 0.94])),  # gini: 22
