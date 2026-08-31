@@ -6,38 +6,89 @@ import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer
 import string
 from scipy.special import softmax
-from typing import List, Union, Callable
+from typing import List, Union, Callable, Dict, Optional
+from dataclasses import dataclass, asdict
 
 from utils import markov_stationary
 
 
+@dataclass
+class CorpusConfig:
+    n_docs: Union[int, List[int]]
+    num_topics: Union[int, List[int]]
+    vocab_size_per_topic: Union[int, List[int]] = 500
+    text_len_dist: Callable = np.random.poisson
+    text_len_params: Optional[Union[Dict, List[Dict]]] = None
+    generation_mode: str = 'stm'
+    n_groups_prev: int = 2
+    prev_covar_imbal: Optional[List[float]] = None
+    n_groups_cont: int = 2
+    cont_covar_imbal: Optional[List[float]] = None
+    prev_effect_size: float = 0.0
+    cont_effect_size: float = 0.0
+    topic_proportions: Optional[Union[List[float], np.ndarray]] = None
+    topic_covar: Union[float, np.ndarray] = 0.0
+    stopword_ratio: float = 0.0
+    n_stopwords: int = 50
+    min_word_freq: int = 1
+    topic_signal_boost: float = 6.0
+    overlap_ratio: float = 0.0
+    unstandard_ratio: float = 0.0
+    max_variants: int = 8
+    zipf_s: float = 1.1
+    markov_matrix: Optional[np.ndarray] = None
+    store_documents: bool = False
+
+    def __post_init__(self):
+        self.n_subcorpora = len(self.n_docs) if isinstance(self.n_docs, list) else 1
+
+        if self.text_len_params is None:
+            self.text_len_params = {"lam": 100}
+        self.n_docs = self._to_list(self.n_docs)
+        self.num_topics_list = self._to_list(self.num_topics)
+        self.len_params = self._to_list(self.text_len_params)
+
+        # validation for composite corpus consistency
+        list_params = {
+            "n_docs": self.n_docs,
+            "num_topics": self.num_topics_list,
+            "text_len_params": self.len_params
+        }
+        for param_name, param_value_list in list_params.items():
+            if len(param_value_list) != self.n_subcorpora:
+                raise ValueError(f"parameter '{param_name}' must have length {self.n_subcorpora} to match n_docs")
+
+        # Covariate imbalance validation
+        if self.prev_covar_imbal is not None:
+            if len(self.prev_covar_imbal) != self.n_groups_prev:
+                raise ValueError(f"prev_covar_imbal should have one value for each prevalence covariate group: {self.n_groups_prev=}")
+        else:
+            self.prev_covar_imbal = [1.0 / self.n_groups_prev] * self.n_groups_prev
+
+        if self.cont_covar_imbal is not None:
+            if len(self.cont_covar_imbal) != self.n_groups_cont:
+                raise ValueError(f"cont_covar_imbal should have one value for each prevalence covariate group: {self.n_groups_cont=}")
+        else:
+            self.cont_covar_imbal = [1.0 / self.n_groups_cont] * self.n_groups_cont
+
+    def _to_list(self, p):
+        if isinstance(p, list):
+            return p
+        return [p] * self.n_subcorpora
+
+    def to_dict(self):
+        """converting non-serializable objects to strings for JSON"""
+        d = asdict(self)
+        for k, v in d.items():
+            if callable(v) or isinstance(v, np.ndarray):
+                d[k] = str(v)
+        return d
+
+
 class SyntheticCorpus:
-    def __init__(self,
-                 n_docs: Union[int, List[int]],
-                 num_topics: Union[int, List[int]],
-                 vocab_size_per_topic: Union[int, List[int]] = 500,
-                 text_len_dist: Callable = np.random.poisson,
-                 text_len_params: Union[None, dict, List[dict]] = None,
-                 generation_mode: str = 'stm',
-                 n_groups_prev: int = 2,
-                 prev_covar_imbal: Union[None, list] = None,
-                 n_groups_cont: int = 2,
-                 cont_covar_imbal: Union[None, list] = None,
-                 prev_effect_size: float = 0.0,
-                 cont_effect_size: float = 0.0,
-                 topic_proportions: Union[None, list, np.ndarray] = None,
-                 topic_covar: Union[float, np.ndarray] = 0.0,
-                 stopword_ratio: float = 0.0,
-                 n_stopwords: int = 50,
-                 min_word_freq: int = 1,
-                 topic_signal_boost: float = 6.0,
-                 overlap_ratio: float = 0.0,
-                 unstandard_ratio: float = 0.0,
-                 max_variants: int = 8,
-                 zipf_s: float = 1.1,
-                 markov_matrix: Union[np.ndarray, None] = None):
+    def __init__(self, **kwargs):
         """
-        Synthetic corpus generation
+        Synthetic corpus generation. Parameters are managed by CorpusConfig.
 
         :param n_docs: number of documents
         :param num_topics: number of topics
@@ -59,8 +110,8 @@ class SyntheticCorpus:
         :param prev_effect_size: prevalence covariate effect size
         :param cont_effect_size: content covariate effect size
         :param topic_proportions: proportions of topic in corpus
-            does not have effect ii markov mode if markov matrix is provided (in this case the sationary distribution of
-            the matrix defines the proportions)
+            does not have effect in markov mode if markov matrix is provided (in this case the stationary distribution
+            of the matrix defines the proportions)
         :param topic_covar: topic covar - can be defined by one number (same pairwise corr)
             or with a covariance matrix
         :param stopword_ratio: ratio of stopwords (stop1, stop2, ...)
@@ -70,68 +121,75 @@ class SyntheticCorpus:
         :param topic_signal_boost: defines topic words boosted probability
             larger numbers results in cleaner topics
         :param overlap_ratio: ratio of topic tokens that are associated with multiple topics
-        :param unstandard_ratio: ratio of tokens that are not standard forms (signald with _v#)
+        :param unstandard_ratio: ratio of tokens that are not standard forms (signaled with _v#)
         :param max_variants: number of different forms for unstandard words
         :param zipf_s: zipf distribution exponent param
         :param markov_matrix: markov transition between topics for mode 'markov'
+        :param store_documents: whether to store whole documents, mainly for testing, bool, default: False
         """
-        self.config = {k: str(v) if (callable(v) or isinstance(v, np.ndarray)) else v for k, v in locals().items() if k != 'self'}
+        self.cfg = CorpusConfig(**kwargs)
+        self.config = self.cfg.to_dict()
 
-        if text_len_params is None:
-            text_len_params = {"lam": 100}
-        self.n_subcorpora = len(n_docs) if isinstance(n_docs, list) else 1
-        self.n_docs = self._to_list(n_docs)
-        self.num_topics_list = self._to_list(num_topics)
-        self.len_params = self._to_list(text_len_params)
-        self.text_len_dist = text_len_dist
-
-        if prev_covar_imbal is not None:
-            if len(prev_covar_imbal) != n_groups_prev:
-                raise ValueError(f"prev_covar_imbal should have one value for each prevalence covariate group")
-            self.prev_covar_imbal = prev_covar_imbal
-        else:
-            self.prev_covar_imbal = [1/n_groups_prev] * n_groups_prev
-
-        if cont_covar_imbal is not None:
-            if len(cont_covar_imbal) != n_groups_cont:
-                raise ValueError(f"cont_covar_imbal should have one value for each prevalence covariate group")
-            self.cont_covar_imbal = cont_covar_imbal
-        else:
-            self.cont_covar_imbal = [1/n_groups_cont] * n_groups_cont
-
-        self.mode = generation_mode
-        self.stopword_ratio = stopword_ratio
-        self.min_word_freq = min_word_freq
-        self.unstd_ratio = unstandard_ratio
-        self.zipf_s = zipf_s
-        self.n_groups_prev = n_groups_prev
-        self.n_groups_cont = n_groups_cont
-        self.topic_signal_boost = topic_signal_boost
+        # Initialize core variables from config
+        self.n_subcorpora = self.cfg.n_subcorpora
+        self.n_docs = self.cfg.n_docs
+        self.num_topics_list = self.cfg.num_topics_list
+        self.len_params = self.cfg.len_params
+        self.text_len_dist = self.cfg.text_len_dist
+        self.prev_covar_imbal = self.cfg.prev_covar_imbal
+        self.cont_covar_imbal = self.cfg.cont_covar_imbal
+        self.mode = self.cfg.generation_mode
+        self.stopword_ratio = self.cfg.stopword_ratio
+        self.min_word_freq = self.cfg.min_word_freq
+        self.unstd_ratio = self.cfg.unstandard_ratio
+        self.zipf_s = self.cfg.zipf_s
+        self.n_groups_prev = self.cfg.n_groups_prev
+        self.n_groups_cont = self.cfg.n_groups_cont
+        self.topic_signal_boost = self.cfg.topic_signal_boost
 
         max_t = max(self.num_topics_list)
-        if topic_proportions is not None:
-            self.topic_proportions = np.array(topic_proportions) / sum(topic_proportions)
+        if self.cfg.topic_proportions is not None:
+            self.topic_proportions = np.array(self.cfg.topic_proportions) / sum(self.cfg.topic_proportions)
         else:
             self.topic_proportions = np.ones(max_t) / max_t
 
         # Vocabulary & distribution
-        self.vocab_size_per_topic = vocab_size_per_topic if isinstance(vocab_size_per_topic, list) else [vocab_size_per_topic] * (num_topics if isinstance(num_topics, int) else sum(num_topics))
-        self.full_vocab, self.topic_to_symbols, self.stopwords = self._build_vocab(overlap_ratio, n_stopwords, max_variants)
+        vs = self.cfg.vocab_size_per_topic
+        self.vocab_size_per_topic = vs if isinstance(vs, list) else [vs] * max_t
+        
+        self.full_vocab, self.topic_to_symbols, self.stopwords = self._build_vocab(
+            self.cfg.overlap_ratio, self.cfg.n_stopwords, self.cfg.max_variants
+        )
         self.v_size = len(self.full_vocab)
         self.word_to_idx = {w: i for i, w in enumerate(self.full_vocab)}
 
-        self._init_generative_params(cont_effect_size, prev_effect_size, topic_covar, markov_matrix)
+        self._init_generative_params(
+            self.cfg.cont_effect_size,
+            self.cfg.prev_effect_size,
+            self.cfg.topic_covar,
+            self.cfg.markov_matrix
+        )
 
         # execution
+        self.documents, self.metadata, self.ground_truth_theta = [], [], []
+        self.is_generated = False
+
+    def generate(self):
+        """
+        generates documents if not already done and removes rare words if required
+        """
+        if self.is_generated:
+            return self
+            
         self.documents, self.metadata, self.ground_truth_theta = [], [], []
         self._synthesize()
 
         # removing rare words
         if self.min_word_freq > 1:
             self._remove_rare_words()
-
-    def _to_list(self, p):
-        return p if isinstance(p, list) else [p] * self.n_subcorpora
+            
+        self.is_generated = True
+        return self
 
     def _build_vocab(self, overlap_ratio, n_stopwords, max_variants):
         max_t = max(self.num_topics_list)
@@ -144,8 +202,13 @@ class SyntheticCorpus:
             n_ov = int(sum(self.vocab_size_per_topic) * overlap_ratio)
             for overl in range(n_ov):
                 t1, t2 = np.random.choice(range(max_t), 2, replace=False)
-                i_t1 = np.random.randint(0, len(topic_map[t1]))
-                i_t2 = np.random.randint(0, len(topic_map[t2]))
+                # select from yet unmerged words to prevent recursive multi-word merges
+                unshared_t1 = [idx for idx, w in enumerate(topic_map[t1]) if "_" not in w]
+                unshared_t2 = [idx for idx, w in enumerate(topic_map[t2]) if "_" not in w]
+                if not unshared_t1 or not unshared_t2:
+                    break
+                i_t1 = np.random.choice(unshared_t1)
+                i_t2 = np.random.choice(unshared_t2)
                 shared = f"{topic_map[t1][i_t1]}_{topic_map[t2][i_t2]}"
                 topic_map[t1][i_t1] = topic_map[t2][i_t2] = shared
 
@@ -290,6 +353,7 @@ class SyntheticCorpus:
         """
         returns the true beta and theta for evaluation
         """
+        self.generate()
         max_t = max(self.num_topics_list)
         true_betas = {}
         true_beta_overall = np.zeros((max_t, self.v_size))
@@ -309,33 +373,90 @@ class SyntheticCorpus:
         }
 
     def export_for_r(self, path_prefix):
+        self.generate()
         if not os.path.exists(path_prefix):
             os.makedirs(path_prefix)
-        docs_as_strings = [" ".join(doc) for doc in self.documents]
-        vectorizer = CountVectorizer(vocabulary=self.full_vocab, token_pattern=r"(?u)\b\w+\b")
-        dtm = vectorizer.transform(docs_as_strings)
-        # Save DTM as CSV
-        pd.DataFrame(dtm.toarray(), columns=self.full_vocab).to_csv(f"{path_prefix}_dtm.csv", index=False)
-        pd.DataFrame(self.metadata).to_csv(f"{path_prefix}_meta.csv", index=False)
-        with open(f"{path_prefix}_config.json", 'w') as f:
-            json.dump(self.config, f, indent=4)
-        theta_cols = [f"Topic_{i}" for i in range(max(self.num_topics_list))]
-        # col: topic; row: doc
-        pd.DataFrame(self.ground_truth_theta, columns=theta_cols).to_csv(f"{path_prefix}_true_thetas.csv", index=False)
+        
+        # JSON
+        dtm_indices = []
+        dtm_counts = []
+        docs_json = []
+        
+        for doc in self.documents:
+            counts_map = Counter(doc)
+            indices = []
+            counts = []
+            for word, count in counts_map.items():
+                if word in self.word_to_idx:
+                    indices.append(int(self.word_to_idx[word]))
+                    counts.append(int(count))
+            # Sort by indices for consistency
+            sorted_pairs = sorted(zip(indices, counts))
+            indices = [p[0] for p in sorted_pairs]
+            counts = [p[1] for p in sorted_pairs]
+            
+            dtm_indices.append(indices)
+            dtm_counts.append(counts)
+            
+            if self.cfg.store_documents:
+                docs_json.append({
+                    "text": " ".join(doc),
+                    "indices": indices,
+                    "counts": counts
+                })
+
         max_t = max(self.num_topics_list)
+        true_betas_json = {}
         true_beta_overall = np.zeros((max_t, self.v_size))
         for g in range(self.n_groups_cont):
             group_beta = np.array([self._get_beta(t, g) for t in range(max_t)])
-            beta_matrix = group_beta
+            true_betas_json[f"group_{g}"] = group_beta.tolist()
             true_beta_overall += group_beta * self.cont_covar_imbal[g]
-            # col: words, rows: topics 1/content covar class
-            pd.DataFrame(beta_matrix, columns=self.full_vocab).to_csv(f"{path_prefix}_true_beta_group_{g}.csv",
-                                                                      index=False)
-        pd.DataFrame(true_beta_overall, columns=self.full_vocab).to_csv(f"{path_prefix}_true_beta_overall.csv",
-                                                                        index=False)
-        print(f"Exported {5 + self.n_groups_cont} file as {path_prefix}... (_dtm.csv, _config.json, _meta.csv, _true_thetas.csv, _true_beta_overall.csv, _true_beta_group_#.csv)")
+        true_betas_json["overall"] = true_beta_overall.tolist()
+
+        corpus_json = {
+            "config": self.config,
+            "vocab": self.full_vocab,
+            "metadata": self.metadata,
+            "dtm": {
+                "indices": dtm_indices,
+                "counts": dtm_counts
+            },
+            "true_thetas": [np.array(th).tolist() for th in self.ground_truth_theta],
+            "true_betas": true_betas_json
+        }
+        
+        if self.cfg.store_documents:
+            corpus_json["documents"] = docs_json
+        
+        with open(f"{path_prefix}_corpus.json", 'w') as f:
+            json.dump(corpus_json, f, indent=4, default=int)
+
+        # # older solution
+        # docs_as_strings = [" ".join(doc) for doc in self.documents]
+        # vectorizer = CountVectorizer(vocabulary=self.full_vocab, token_pattern=r"(?u)\b\w+\b")
+        # dtm = vectorizer.transform(docs_as_strings)
+        # # Save DTM as CSV
+        # pd.DataFrame(dtm.toarray(), columns=self.full_vocab).to_csv(f"{path_prefix}_dtm.csv", index=False)
+        # pd.DataFrame(self.metadata).to_csv(f"{path_prefix}_meta.csv", index=False)
+        # with open(f"{path_prefix}_config.json", 'w') as f:
+        #     json.dump(self.config, f, indent=4)
+        # theta_cols = [f"Topic_{i}" for i in range(max(self.num_topics_list))]
+        # # col: topic; row: doc
+        # pd.DataFrame(self.ground_truth_theta, columns=theta_cols).to_csv(f"{path_prefix}_true_thetas.csv", index=False)
+        #
+        # for g in range(self.n_groups_cont):
+        #     group_beta = np.array([self._get_beta(t, g) for t in range(max_t)])
+        #     beta_matrix = group_beta
+        #     # col: words, rows: topics 1/content covar class
+        #     pd.DataFrame(beta_matrix, columns=self.full_vocab).to_csv(f"{path_prefix}_true_beta_group_{g}.csv",
+        #                                                               index=False)
+        # pd.DataFrame(true_beta_overall, columns=self.full_vocab).to_csv(f"{path_prefix}_true_beta_overall.csv",
+        #                                                                 index=False)
+        print(f"JSONs created at {path_prefix}...")
 
     def get_data(self):
+        self.generate()
         docs_as_strings = [" ".join(doc) for doc in self.documents]
         return pd.DataFrame(self.metadata).assign(text=docs_as_strings)
 
@@ -356,7 +477,7 @@ if __name__ == "__main__":
     # for k, v in lda_toy.get_gold_standard().items():
     #     print(f"  {'-'*15} {k} {'-'*15}")
     #     print(v)
-    lda_toy.export_for_r('simul_data/trial00')
+    lda_toy.export_for_r('simul_data/trial00/')
 
     # # STM (covar + covariates)
     stm_toy = SyntheticCorpus(
@@ -370,7 +491,7 @@ if __name__ == "__main__":
     )
     print("\n--- Toy 2: STM ---")
     print(stm_toy.get_data())
-    stm_toy.export_for_r('simul_data/trial01')
+    stm_toy.export_for_r('simul_data/trial01/')
 
     # Markov (Transition Matrix provided)
     corr_m = np.array([
@@ -392,7 +513,7 @@ if __name__ == "__main__":
     # for k, v in markov_toy.get_gold_standard().items():
     #     print(f"  {'-'*15} {k} {'-'*15}")
     #     print(v)
-    markov_toy.export_for_r('simul_data/trial02')
+    markov_toy.export_for_r('simul_data/trial02/')
     #
     # Composite corpus (Bimodal/Unbalanced)
     # 5 short docs with 2 topics, 6 long docs with 4 topics
@@ -405,4 +526,4 @@ if __name__ == "__main__":
     print("\n--- Toy 4: Composite ---")
     data = composite_toy.get_data()
     print(data.groupby('subcorpus').agg({'text': lambda x: x.iloc[0][:50], 'prev_covar': 'count'}))
-    composite_toy.export_for_r('simul_data/trial03')
+    composite_toy.export_for_r('simul_data/trial03/')
