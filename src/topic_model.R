@@ -7,8 +7,42 @@ library(jsonlite)
 # devtools::install_github("etam4260/kneedle")
 library(kneedle)
 
-# params to change for each simulated data
-setwd("D:/bj/documents/munk/analysis/LDA_simul/")
+# Default values for command line parameters
+base_data_path <- "simul_data"
+searchk_range <- 5
+n_runs <- 4
+search_k_permodelfit <- FALSE
+
+# Handle command line arguments dynamically
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) > 0) {
+  # If the first argument does not start with --, treat it as the base path for backwards compatibility
+  if (!startsWith(args[1], "--")) {
+    base_data_path <- args[1]
+  }
+  
+  # Parse named options
+  for (i in seq_along(args)) {
+    if (args[i] == "--base_path" && i < length(args)) {
+      base_data_path <- args[i+1]
+    }
+    if (args[i] == "--searchk_range" && i < length(args)) {
+      searchk_range <- as.numeric(args[i+1])
+    }
+    if (args[i] == "--n_runs" && i < length(args)) {
+      n_runs <- as.numeric(args[i+1])
+    }
+    if (args[i] == "--search_k_permodelfit" && i < length(args)) {
+      val <- toupper(args[i+1])
+      search_k_permodelfit <- (val == "TRUE" || val == "T")
+    }
+  }
+}
+
+# Ensure the path is relative to the current working directory or absolute as provided
+if (!dir.exists(base_data_path)) {
+  stop(paste("Base data directory does not exist:", base_data_path))
+}
 
 # maximum distance
 find_elbow <- function(k_values, metric_values, minimize = FALSE) {
@@ -70,28 +104,55 @@ get_consensus_k <- function(x) {
 
 run_full_eval <- function(simul_name,
                           searchk_range = 5,
-                          n_runs = 5) {
+                          n_runs = 5,
+                          base_path = "simul_data",
+                          search_k_permodelfit = FALSE) {
   
-  path_prefix <- paste0("simul_data/", simul_name)
-  path_prefix_save <- paste0(path_prefix, "/model_fits/")
+  path_prefix <- file.path(base_path, simul_name)
+  path_prefix_save <- file.path(path_prefix, "model_fits")
   if (!dir.exists(path_prefix_save)) {
     dir.create(path_prefix_save, recursive = TRUE)
   }
   ##############
   #
   # loading data
-  dtm_df <- fread(paste0(path_prefix, "_dtm.csv"))
-  meta_df <- fread(paste0(path_prefix, "_meta.csv"))
-  config <- read_json(paste0(path_prefix, "_config.json"))
+  corpus_json_path <- paste0(path_prefix, "/_corpus.json")
+  if (!file.exists(corpus_json_path)) {
+    stop(paste("Unified corpus JSON file not found:", corpus_json_path))
+  }
   
-  dtm_matrix <- as.matrix(dtm_df)
-  vocab <- colnames(dtm_matrix)
+  corpus <- jsonlite::fromJSON(corpus_json_path, simplifyVector = TRUE)
+  config <- corpus$config
+  vocab <- corpus$vocab
+  meta_df <- as.data.table(corpus$metadata)
+  
+  # Reconstruct dtm_matrix from sparse JSON DTM
+  n_docs <- length(corpus$dtm$indices)
+  v_size <- length(vocab)
+  dtm_matrix <- matrix(0, nrow = n_docs, ncol = v_size)
+  colnames(dtm_matrix) <- vocab
+  
+  for (i in seq_len(n_docs)) {
+    indices <- corpus$dtm$indices[[i]]
+    counts <- corpus$dtm$counts[[i]]
+    if (length(indices) > 0) {
+      dtm_matrix[i, indices + 1] <- counts
+    }
+  }
   
   # removing empty docs if any
   keep_docs <- rowSums(dtm_matrix) > 0
   if(sum(!keep_docs) > 0) {
     dtm_matrix <- dtm_matrix[keep_docs, ]
     meta_df <- meta_df[keep_docs, ]
+  }
+  
+  # Remove words that do not appear in any document (columns with all zeros)
+  # This is critical to prevent STM's "Word indices must be sequential integers starting with 1" error
+  keep_vocab <- colSums(dtm_matrix) > 0
+  if (sum(!keep_vocab) > 0) {
+    dtm_matrix <- dtm_matrix[, keep_vocab, drop = FALSE]
+    vocab <- vocab[keep_vocab]
   }
   
   meta_df$prev_covar <- as.factor(meta_df$prev_covar)
@@ -111,147 +172,212 @@ run_full_eval <- function(simul_name,
   
   ############
   ##
-  ##  search K  # TODO: move inside simulation to have multiple results and see variance
+  ##  search K
   ##
   k_range <- seq(max(2, true_k - searchk_range), true_k + searchk_range, by = 1)
   run_id <- paste0("sim_", simul_name, "_", format(Sys.time(), "%Y%m%d_%H%M%S"))
   
-  cat("\n--- Running ldatuning --- \n")
-  # Griffiths2004: maximizing log-likelihood (//perpl)
-  # CaoJuan2009: inverse cosine similarity of topics
-  # Arun2010: SVD based KL divergence of the topic-word and topic-document distributions
-  # Deveaud2014: maximizes topic distance (Shannon divergence based)
-  k_results_lda <- FindTopicsNumber(
-    dtm_matrix, topics = k_range,
-    metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
-    method = "Gibbs", verbose = T
-  )
-  cat("\n--- Running searchK for STM --- \n")
-  k_results_stm <- searchK(
-    stm_data$documents, stm_data$vocab, K = k_range,
-    prevalence =~ prev_covar, data = meta_df, verbose = T
-  )
-  
-  lda_clean <- as.data.frame(lapply(k_results_lda, as.numeric))
-  stm_clean <- data.frame(
-    topics = as.numeric(unlist(k_results_stm$results$K)),
-    semcoh = as.numeric(unlist(k_results_stm$results$semcoh)),
-    heldout = as.numeric(unlist(k_results_stm$results$heldout)),
-    residual = as.numeric(unlist(k_results_stm$results$residual))
-  )
-  
-  k_lda_gr <- find_elbow_kneedle(lda_clean$topics, lda_clean$Griffiths2004, decreasing = FALSE)
-  k_lda_dev <- find_elbow_kneedle(lda_clean$topics, lda_clean$Deveaud2014, decreasing = FALSE)
-  k_lda_cao <- find_elbow_kneedle(lda_clean$topics, lda_clean$CaoJuan2009, decreasing = TRUE)
-  k_lda_arun <- find_elbow_kneedle(lda_clean$topics, lda_clean$Arun2010, decreasing = TRUE)
-  
-  k_stm_semcoh <- find_elbow_kneedle(stm_clean$topics, stm_clean$semcoh, decreasing = FALSE)
-  k_stm_held <- find_elbow_kneedle(stm_clean$topics, stm_clean$heldout, decreasing = FALSE)
-  k_stm_res <- find_elbow_kneedle(stm_clean$topics, stm_clean$residual, decreasing = TRUE)
-  
-  # consensus
-  best_k_lda <- get_consensus_k(c(k_lda_gr, k_lda_dev, k_lda_cao, k_lda_arun))
-  best_k_stm <- get_consensus_k(c(k_stm_semcoh, k_stm_held, k_stm_res))
-  # fallback in case kneedle fails entirely
-  if(is.na(best_k_lda)) {
-    print("kneedle algorithm failed for LDA")
-    best_k_lda <- true_k
-  }
-  if(is.na(best_k_stm)) {
-    print("kneedle algorithm failed for STM")
-    best_k_stm <- true_k
-  }
-  
-  ##########
-  #
-  # log
-  # clean the config list
+  # clean the config list for logging
   clean_config <- lapply(config, function(x) {
-    # Catch NULLs or empty lists and replace with NA
-    if (is.null(x) || length(x) == 0) {
-      return(NA)
-    } 
-    # Collapse multi-item lists into a single string
-    if (length(x) > 1) {
-      return(paste(x, collapse=","))
-    } 
-    # Otherwise, return the item
+    if (is.null(x) || length(x) == 0) return(NA)
+    if (length(x) > 1) return(paste(x, collapse=","))
     return(x)
   })
   config_df <- as.data.frame(clean_config, stringsAsFactors = FALSE)
-  
-  # Pivot to wide format
-  lda_long <- melt(as.data.table(lda_clean), id.vars = "topics", variable.name = "Metric", value.name = "Value")
-  stm_long <- melt(as.data.table(stm_clean), id.vars = "topics", variable.name = "Metric", value.name = "Value")
-  # setnames(stm_long, "K", "topics")
-  all_metrics_long <- rbind(lda_long, stm_long)
-  # cretae cols MetricName_K
-  wide_metrics <- dcast(all_metrics_long, . ~ Metric + topics, value.var = "Value")
-  wide_metrics$. <- NULL
-  
-  # Combine into one row
-  master_log_row <- cbind(
-    data.frame(Run_ID = run_id, True_K = true_k),
-    config_df,
-    wide_metrics,
-    data.frame(
-      Elbow_Griffiths = k_lda_gr, Elbow_Deveaud = k_lda_dev, Elbow_CaoJuan = k_lda_cao, Elbow_Arun = k_lda_arun,
-      Elbow_SemCoh = k_stm_semcoh, Elbow_Heldout = k_stm_held, Elbow_Residual = k_stm_res,
-      Final_Consensus_K_LDA = best_k_lda, Final_Consensus_K_STM = best_k_stm
+
+  # Global parameters outside the loop
+  best_k_stm_global <- true_k
+  best_k_lda_global <- true_k
+  best_k_lda_run1 <- true_k
+
+  if (!search_k_permodelfit) {
+    # 1. Run deterministic/global STM searchK once outside the loop
+    cat("\n--- Running searchK for STM --- \n")
+    k_results_stm <- searchK(
+      stm_data$documents, stm_data$vocab, K = k_range,
+      prevalence =~ prev_covar, data = meta_df, verbose = T
     )
-  )
-  
-  write.csv(master_log_row, paste0(path_prefix_save, "simulation_master_log.csv"), row.names = FALSE)
-  
-  #####################
-  ##
-  ##  fitting models
-  
-  for (run in 1:n_runs) {
-    cat(paste("\n--- Starting Model Fits: Run", run, "---\n"))
-    run_dir <- paste0(path_prefix_save, "run_", run)
-    dir.create(run_dir, showWarnings = FALSE)
-    
-    # LDA
-    m_lda <- LDA(dtm_matrix, k = best_k_lda, method = "Gibbs")
-    write.csv(posterior(m_lda)$topics, paste0(run_dir, "/lda_theta.csv"), row.names = FALSE)
-    write.csv(posterior(m_lda)$terms, paste0(run_dir, "/lda_beta_overall.csv"), row.names = FALSE)
-    
-    # CTM
-    m_ctm <- CTM(dtm_matrix, k = best_k_lda)
-    write.csv(posterior(m_ctm)$topics, paste0(run_dir, "/ctm_theta.csv"), row.names = FALSE)
-    write.csv(posterior(m_ctm)$terms, paste0(run_dir, "/ctm_beta_overall.csv"), row.names = FALSE)
-    
-    # STM  - TODO: move outside the loop (with spectral init it s deterministic)
+    stm_clean <- data.frame(
+      topics = as.numeric(unlist(k_results_stm$results$K)),
+      semcoh = as.numeric(unlist(k_results_stm$results$semcoh)),
+      heldout = as.numeric(unlist(k_results_stm$results$heldout)),
+      residual = as.numeric(unlist(k_results_stm$results$residual))
+    )
+    k_stm_semcoh <- find_elbow_kneedle(stm_clean$topics, stm_clean$semcoh, decreasing = FALSE)
+    k_stm_held <- find_elbow_kneedle(stm_clean$topics, stm_clean$heldout, decreasing = FALSE)
+    k_stm_res <- find_elbow_kneedle(stm_clean$topics, stm_clean$residual, decreasing = TRUE)
+    best_k_stm_global <- get_consensus_k(c(k_stm_semcoh, k_stm_held, k_stm_res))
+    if(is.na(best_k_stm_global)) best_k_stm_global <- true_k
+
+    # Fit STM once globally (Deterministic: Moved out of stochastic loop)
+    cat("\n--- Fitting Deterministic STM --- \n")
     m_stm <- stm(
-      documents = stm_data$documents, vocab = stm_data$vocab, K = best_k_stm,
+      documents = stm_data$documents, vocab = stm_data$vocab, K = best_k_stm_global,
       prevalence =~ prev_covar, content =~ content_covar, data = meta_df,
       init.type = "Spectral", verbose = T
     )
-    write.csv(m_stm$theta, paste0(run_dir, "/stm_theta.csv"), row.names = FALSE)
-    
-    # Extract specific beta matrices for each content group
+    write.csv(m_stm$theta, paste0(path_prefix_save, "/stm_theta.csv"), row.names = FALSE)
     content_levels <- m_stm$settings$covariates$yvarlevels
     for (i in seq_along(content_levels)) {
       beta_matrix <- exp(m_stm$beta$logbeta[[i]])
       colnames(beta_matrix) <- stm_data$vocab
-      write.csv(beta_matrix, paste0(run_dir, "/stm_beta_group_", content_levels[i], ".csv"), row.names = FALSE)
+      write.csv(beta_matrix, paste0(path_prefix_save, "/stm_beta_group_", content_levels[i], ".csv"), row.names = FALSE)
     }
+
+    # 2. Run traditional global Search K for LDA
+    cat("\n--- Running ldatuning --- \n")
+    k_results_lda <- FindTopicsNumber(
+      dtm_matrix, topics = k_range,
+      metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+      method = "Gibbs", verbose = T
+    )
+    lda_clean <- as.data.frame(lapply(k_results_lda, as.numeric))
+    
+    k_lda_gr <- find_elbow_kneedle(lda_clean$topics, lda_clean$Griffiths2004, decreasing = FALSE)
+    k_lda_dev <- find_elbow_kneedle(lda_clean$topics, lda_clean$Deveaud2014, decreasing = FALSE)
+    k_lda_cao <- find_elbow_kneedle(lda_clean$topics, lda_clean$CaoJuan2009, decreasing = TRUE)
+    k_lda_arun <- find_elbow_kneedle(lda_clean$topics, lda_clean$Arun2010, decreasing = TRUE)
+    
+    best_k_lda_global <- get_consensus_k(c(k_lda_gr, k_lda_dev, k_lda_cao, k_lda_arun))
+    if(is.na(best_k_lda_global)) best_k_lda_global <- true_k
+    best_k_lda_run1 <- best_k_lda_global
+
+    # Log master metrics once globally
+    lda_long <- melt(as.data.table(lda_clean), id.vars = "topics", variable.name = "Metric", value.name = "Value")
+    stm_long <- melt(as.data.table(stm_clean), id.vars = "topics", variable.name = "Metric", value.name = "Value")
+    all_metrics_long <- rbind(lda_long, stm_long)
+    wide_metrics <- dcast(all_metrics_long, . ~ Metric + topics, value.var = "Value")
+    wide_metrics$. <- NULL
+    
+    master_log_row <- cbind(
+      data.frame(Run_ID = run_id, True_K = true_k),
+      config_df,
+      wide_metrics,
+      data.frame(
+        Elbow_Griffiths = k_lda_gr, Elbow_Deveaud = k_lda_dev, Elbow_CaoJuan = k_lda_cao, Elbow_Arun = k_lda_arun,
+        Elbow_SemCoh = k_stm_semcoh, Elbow_Heldout = k_stm_held, Elbow_Residual = k_stm_res,
+        Final_Consensus_K_LDA = best_k_lda_global, Final_Consensus_K_STM = best_k_stm_global
+      )
+    )
+    write.csv(master_log_row, paste0(path_prefix_save, "/simulation_master_log.csv"), row.names = FALSE)
   }
-  # LSI
-  m_lsa <- lsa(t(dtm_matrix), dims = best_k_lda)
-  write.csv(m_lsa$dk, paste0(path_prefix_save, "lsi_theta.csv"), row.names = FALSE)
-  write.csv(t(m_lsa$tk), paste0(path_prefix_save, "lsi_beta_overall.csv"), row.names = FALSE)
+
+  #####################
+  ##  stochastic fitting loop
+  for (run in 1:n_runs) {
+    cat(paste("\n--- Starting Model Fits: Run", run, "---\n"))
+    run_dir <- file.path(path_prefix_save, paste0("run_", run))
+    dir.create(run_dir, showWarnings = FALSE, recursive = TRUE)
+    
+    # Local run variables
+    current_best_k_lda <- best_k_lda_global
+    
+    if (search_k_permodelfit) {
+      # Stochastic Search K for both LDA and STM (sampling is involved)
+      # STM searchK is stochastic due to random held-out words partitioning
+      cat(paste("\n--- Running local searchK (STM) for Run", run, "--- \n"))
+      k_results_stm <- searchK(
+        stm_data$documents, stm_data$vocab, K = k_range,
+        prevalence =~ prev_covar, data = meta_df, verbose = T
+      )
+      stm_clean <- data.frame(
+        topics = as.numeric(unlist(k_results_stm$results$K)),
+        semcoh = as.numeric(unlist(k_results_stm$results$semcoh)),
+        heldout = as.numeric(unlist(k_results_stm$results$heldout)),
+        residual = as.numeric(unlist(k_results_stm$results$residual))
+      )
+      k_stm_semcoh <- find_elbow_kneedle(stm_clean$topics, stm_clean$semcoh, decreasing = FALSE)
+      k_stm_held <- find_elbow_kneedle(stm_clean$topics, stm_clean$heldout, decreasing = FALSE)
+      k_stm_res <- find_elbow_kneedle(stm_clean$topics, stm_clean$residual, decreasing = TRUE)
+      current_best_k_stm <- get_consensus_k(c(k_stm_semcoh, k_stm_held, k_stm_res))
+      if(is.na(current_best_k_stm)) current_best_k_stm <- true_k
+
+      # Fit STM locally for this run (since its selected K is stochastic)
+      cat(paste("\n--- Fitting STM for Run", run, "--- \n"))
+      m_stm <- stm(
+        documents = stm_data$documents, vocab = stm_data$vocab, K = current_best_k_stm,
+        prevalence =~ prev_covar, content =~ content_covar, data = meta_df,
+        init.type = "Spectral", verbose = T
+      )
+      write.csv(m_stm$theta, paste0(run_dir, "/stm_theta.csv"), row.names = FALSE)
+      content_levels <- m_stm$settings$covariates$yvarlevels
+      for (i in seq_along(content_levels)) {
+        beta_matrix <- exp(m_stm$beta$logbeta[[i]])
+        colnames(beta_matrix) <- stm_data$vocab
+        write.csv(beta_matrix, paste0(run_dir, "/stm_beta_group_", content_levels[i], ".csv"), row.names = FALSE)
+      }
+
+      # Stochastic search K for LDA
+      cat(paste("\n--- Running local ldatuning for Run", run, "--- \n"))
+      k_results_lda <- FindTopicsNumber(
+        dtm_matrix, topics = k_range,
+        metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+        method = "Gibbs", verbose = T
+      )
+      lda_clean <- as.data.frame(lapply(k_results_lda, as.numeric))
+      
+      k_lda_gr <- find_elbow_kneedle(lda_clean$topics, lda_clean$Griffiths2004, decreasing = FALSE)
+      k_lda_dev <- find_elbow_kneedle(lda_clean$topics, lda_clean$Deveaud2014, decreasing = FALSE)
+      k_lda_cao <- find_elbow_kneedle(lda_clean$topics, lda_clean$CaoJuan2009, decreasing = TRUE)
+      k_lda_arun <- find_elbow_kneedle(lda_clean$topics, lda_clean$Arun2010, decreasing = TRUE)
+      
+      current_best_k_lda <- get_consensus_k(c(k_lda_gr, k_lda_dev, k_lda_cao, k_lda_arun))
+      if(is.na(current_best_k_lda)) current_best_k_lda <- true_k
+      
+      if (run == 1) {
+        best_k_lda_run1 <- current_best_k_lda
+      }
+
+      # Log run-specific SearchK metrics locally
+      run_metrics <- list(
+        Elbow_Griffiths = k_lda_gr,
+        Elbow_Deveaud = k_lda_dev,
+        Elbow_CaoJuan = k_lda_cao,
+        Elbow_Arun = k_lda_arun,
+        Elbow_SemCoh = k_stm_semcoh,
+        Elbow_Heldout = k_stm_held,
+        Elbow_Residual = k_stm_res,
+        Final_Consensus_K_LDA = current_best_k_lda,
+        Final_Consensus_K_STM = current_best_k_stm
+      )
+      jsonlite::write_json(run_metrics, file.path(run_dir, "searchK_metrics.json"), auto_unbox = TRUE)
+    }
+    
+    # LDA
+    m_lda <- LDA(dtm_matrix, k = current_best_k_lda, method = "Gibbs")
+    write.csv(posterior(m_lda)$topics, paste0(run_dir, "/lda_theta.csv"), row.names = FALSE)
+    write.csv(posterior(m_lda)$terms, paste0(run_dir, "/lda_beta_overall.csv"), row.names = FALSE)
+    
+    # CTM
+    m_ctm <- CTM(dtm_matrix, k = current_best_k_lda)
+    write.csv(posterior(m_ctm)$topics, paste0(run_dir, "/ctm_theta.csv"), row.names = FALSE)
+    write.csv(posterior(m_ctm)$terms, paste0(run_dir, "/ctm_beta_overall.csv"), row.names = FALSE)
+  }
+
+  # LSI (Deterministic: Moved out of stochastic loop)
+  cat("\n--- Fitting Deterministic LSI --- \n")
+  m_lsa <- lsa(t(dtm_matrix), dims = best_k_lda_run1)
+  write.csv(m_lsa$dk, paste0(path_prefix_save, "/lsi_theta.csv"), row.names = FALSE)
+  write.csv(t(m_lsa$tk), paste0(path_prefix_save, "/lsi_beta_overall.csv"), row.names = FALSE)
   
-  cat("\n--- Simulations completed, results saved to", path_prefix_save , "---\n")
+  cat("\n--- Simulations and fits completed, results saved to", path_prefix_save , "---\n")
 }
 
-# run_full_eval(simul_name = "trial01", searchk_range = 5, n_runs = 4)
-for (tp in list.dirs('simul_data', recursive = F)) {
-  tps <- unlist(strsplit(tp, '/'))[length( unlist(strsplit(tp, '/')))]
-  for (cp in list.dirs(paste0('simul_data/', tps), recursive = F)) {
-    cps <- unlist(strsplit(cp, '/'))[length( unlist(strsplit(cp, '/')))]
-    mdln <- paste0(tps, '/', cps, '/')
-    run_full_eval(simul_name = mdln, searchk_range = 5, n_runs = 4)
+# Recursively find all corpus directories containing _corpus.json under base_data_path
+corpus_files <- list.files(base_data_path, pattern = "_corpus.json$", recursive = TRUE, full.names = FALSE)
+
+for (corpus_file in corpus_files) {
+  sim_name <- dirname(corpus_file)
+  if (sim_name != ".") {
+    cat(paste("\n=========================================\n"))
+    cat(paste("Running model fits for simulation:", sim_name, "\n"))
+    cat(paste("=========================================\n"))
+    run_full_eval(
+      simul_name = sim_name,
+      searchk_range = searchk_range,
+      n_runs = n_runs,
+      base_path = base_data_path,
+      search_k_permodelfit = search_k_permodelfit
+    )
   }
 }
