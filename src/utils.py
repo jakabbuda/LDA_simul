@@ -48,7 +48,7 @@ def log_pipeline_event(output_base, phase, status, message):
     """writes unified execution trace to a shared log file"""
     log_path = os.path.join(output_base, "simulation_pipeline.log")
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{timestamp}] [{phase.upper()}] [{status.upper()}] {message}\n"
+    log_line = f"{'-' * 40 + '\n' if status.lower() == 'start' else ''}[{timestamp}] [{phase.upper()}] [{status.upper()}] {message}\n{'-' * 40 + '\n' if status.lower() == 'finish' else ''}"
     os.makedirs(output_base, exist_ok=True)
     with open(log_path, "a") as f:
         f.write(log_line)
