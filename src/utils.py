@@ -1,6 +1,8 @@
 import numpy as np
-from scipy.optimize import linear_sum_assignment
+import os
+from scipy.optimize import linear_sum_assignment, minimize
 from sklearn.metrics.pairwise import cosine_similarity
+import time
 
 
 def markov_stationary(mtrx):
@@ -40,3 +42,41 @@ def make_uncorrelated_markov(self_transition_vec):
 def gini_coeff(lst):
     a = sorted(lst, reverse=True)
     return 2 * sum([(len(a) - i) * v for i, v in enumerate(a)]) / (sum(a) * len(a)) - (len(a) + 1) / len(a)
+
+
+def log_pipeline_event(output_base, phase, status, message):
+    """writes unified execution trace to a shared log file"""
+    log_path = os.path.join(output_base, "simulation_pipeline.log")
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] [{phase.upper()}] [{status.upper()}] {message}\n"
+    os.makedirs(output_base, exist_ok=True)
+    with open(log_path, "a") as f:
+        f.write(log_line)
+
+
+def generate_proportions_with_gini_and_bounds(n, target_gini, min_val=0.01):
+    """used to generate topic proportins with specific gini value"""
+    if min_val * n > 1.0:
+        raise ValueError(f"{min_val=} too large: {n * min_val=} > 1")
+
+    def objective(w):
+        return (gini_coeff(w) - target_gini) ** 2
+
+    constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0})
+
+    bounds = [(min_val, 1.0) for _ in range(n)]
+
+    initial_w = np.linspace(min_val, 1.0, n)
+    initial_w = initial_w / np.sum(initial_w)
+
+    # optimization
+    result = minimize(
+        objective,
+        initial_w,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints,
+        options={'ftol': 1e-12, 'maxiter': 1000}
+    )
+
+    return [float(np.round(i, 6)) for i in sorted(result.x, reverse=True)]

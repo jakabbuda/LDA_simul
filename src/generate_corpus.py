@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from corpus import SyntheticCorpus
-from utils import make_uncorrelated_markov
+from utils import make_uncorrelated_markov, log_pipeline_event
 
 
 def parse_args():
@@ -30,6 +30,7 @@ def load_config(config_path):
     with open(config_path, "r") as f:
         return json.load(f)
 
+
 def save_reproduction_log(output_dir, args_dict, config_path, corpus_info=True, bash_command=True):
     os.makedirs(output_dir, exist_ok=True)
     if corpus_info:
@@ -47,8 +48,27 @@ def save_reproduction_log(output_dir, args_dict, config_path, corpus_info=True, 
             f.write("python3 " + " ".join(sys.argv) + "\n")
         os.chmod(os.path.join(output_dir, "reproduce_command.sh"), 0o755)
 
-def worker_generate_single_run(params, output_dir, config_path):
+
+def worker_generate_single_run(params, output_dir, config_path, group_folder, subgroup_folder, output_base):
+    # Check if unified _corpus.json already exists and is valid
+    corpus_json_path = os.path.join(output_dir, "_corpus.json")
+    if os.path.exists(corpus_json_path):
+        try:
+            with open(corpus_json_path, 'r') as f:
+                json.load(f)
+            msg = f"Skipped generating: {group_folder}/{subgroup_folder} (already completed and valid)"
+            print("  -- " + msg)
+            log_pipeline_event(output_base, "generation", "skipped", msg)
+            return
+        except Exception:
+            pass # corrupted or partial JSON, re-generate
+
+    start_time = time.time()
     generate_single_run(params, output_dir, config_path)
+    duration = round(time.time() - start_time, 1)
+    msg = f"Synthesized and saved corpus to {output_dir} in {duration}s"
+    log_pipeline_event(output_base, "generation", "success", msg)
+
 
 def run_config_simulation(config_data, output_base, config_path, num_cores=1):
     base_params = config_data.get("base_parameters", {})
@@ -61,6 +81,8 @@ def run_config_simulation(config_data, output_base, config_path, num_cores=1):
             
     varying_keys = [k for k, v in normalized_grid.items() if len(v) > 1]
     
+    log_pipeline_event(output_base, "generation", "start", f"Initiating corpus generation. Config file: {config_path}")
+
     # single run fallback
     if not varying_keys:
         print("No varying parameters found in grid. Running a single synthesis...")
@@ -78,7 +100,8 @@ def run_config_simulation(config_data, output_base, config_path, num_cores=1):
             del merged_params["topic_imbalance"]
             
         output_dir = os.path.join(output_base, "single_run")
-        generate_single_run(merged_params, output_dir, config_path)
+        worker_generate_single_run(merged_params, output_dir, config_path, "single", "run", output_base)
+        log_pipeline_event(output_base, "generation", "finish", "Corpus generation pipeline completed.")
         return
 
     # group by largest varying parameter, subgroup by other combinations
@@ -150,7 +173,7 @@ def run_config_simulation(config_data, output_base, config_path, num_cores=1):
         print(f"Spawning parallel generator pool with {num_cores} processes...")
         with ProcessPoolExecutor(max_workers=num_cores) as executor:
             future_to_task = {
-                executor.submit(worker_generate_single_run, t[0], t[1], t[2]): (idx, t[3], t[4])
+                executor.submit(worker_generate_single_run, t[0], t[1], t[2], t[3], t[4], output_base): (idx, t[3], t[4])
                 for idx, t in enumerate(tasks)
             }
             
@@ -159,7 +182,7 @@ def run_config_simulation(config_data, output_base, config_path, num_cores=1):
                 try:
                     future.result()
                     elapsed = int(np.round(time.time() - start_time))
-                    print(f"[{idx+1}/{total_runs}] Synthesized to: {group_folder}/{subgroup_folder}...\ttime passed: {elapsed}s")
+                    print(f"[{idx+1}/{total_runs}] Processed: {group_folder}/{subgroup_folder}...\ttime passed: {elapsed}s")
                 except Exception as exc:
                     print(f"[{idx+1}/{total_runs}] Generated an exception: {exc}")
                     raise exc
@@ -167,10 +190,12 @@ def run_config_simulation(config_data, output_base, config_path, num_cores=1):
         # Sequential execution
         for idx, t in enumerate(tasks):
             merged_params, output_dir, config_path, group_folder, subgroup_folder = t
-            generate_single_run(merged_params, output_dir, config_path)
+            worker_generate_single_run(merged_params, output_dir, config_path, group_folder, subgroup_folder, output_base)
             elapsed = int(np.round(time.time() - start_time))
             estim_rest = int(np.round(elapsed / (idx + 1) * (total_runs - idx - 1)))
-            print(f"[{idx+1}/{total_runs}] Synthesizing to: {group_folder}/{subgroup_folder}...\ttime passed: {elapsed}, estimated remaining time: {estim_rest}")
+            print(f"[{idx+1}/{total_runs}] Processed: {group_folder}/{subgroup_folder}...\ttime passed: {elapsed}, estimated remaining time: {estim_rest}")
+
+    log_pipeline_event(output_base, "generation", "finish", "Corpus generation pipeline completed.")
 
 def generate_single_run(params, output_dir, config_path):
     corpus = SyntheticCorpus(
