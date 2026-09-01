@@ -130,15 +130,15 @@ def run_config_simulation(config_data, output_base, config_path, num_cores=1):
             group_folder = f"gini_{gini_val}"
         else:
             val = str(current_grid_params[grouping_key]).replace('.', 'p')
-            group_folder = f"{grouping_key.replace('_', '')}_{val}"
+            group_folder = f"{grouping_key.replace('_', '')}{val}"
             
         subgroup_parts = []
         for sk in subgroup_keys:
             if sk == "topic_imbalance":
                 subgroup_parts.append(f"gini_{gini_val}")
             else:
-                val = current_grid_params[sk]
-                subgroup_parts.append(f"{sk.replace('_', '')}_{val}")
+                val = str(current_grid_params[sk]).replace('.', 'p')
+                subgroup_parts.append(f"{sk.replace('_', '')}{val}")
                 
         subgroup_folder = "_".join(subgroup_parts) if subgroup_parts else "run"
         output_dir = os.path.join(output_base, group_folder, subgroup_folder)
