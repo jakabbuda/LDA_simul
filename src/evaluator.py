@@ -1,14 +1,24 @@
-import os
+import argparse
 import json
 import numpy as np
+import os
 import pandas as pd
 from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
+from utils import gini_coeff, log_pipeline_event
 
-BASE_PATH = "simul_data/"
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate topic model fits.")
+    parser.add_argument("--base_path", type=str, default="simul_data/", help="base path for simulation data.")
+    parser.add_argument("--top_words", type=int, default=50, help="number of top words for RBO.")
+    return parser.parse_args()
+
+
+args = parse_args()
+BASE_PATH = args.base_path
 MODELS = ["lda", "ctm", "stm", "lsi"]
-N_RUNS = 4
-TOP_WORDS = 50
+TOP_WORDS = args.top_words
 
 
 def calculate_rbo(list1, list2, p=0.9):
@@ -66,97 +76,155 @@ def evaluate_fit(true_beta, fitted_beta, true_theta, fitted_theta, vocab):
     }
 
 
-# iterating data
+# iterating data recursively
 master_data = []
 
-for gini_folder in os.listdir(BASE_PATH):
-    gini_path = os.path.join(BASE_PATH, gini_folder)
-    if not os.path.isdir(gini_path):
+print(f"Scanning directory: {BASE_PATH} recursively for _corpus.json files...")
+log_pipeline_event(BASE_PATH, "evaluation", "start", "Initiating evaluation pipeline across recursive subdirectories.")
+
+for root, dirs, files in os.walk(BASE_PATH):
+    if "_corpus.json" not in files:
+        continue
+        
+    sub_path = root
+    # Deduce a logical folder tag relative to BASE_PATH
+    dir_tag = os.path.relpath(sub_path, BASE_PATH)
+    print(f"Evaluating simulation: {dir_tag}")
+
+    # load ground truth from JSON
+    try:
+        with open(os.path.join(sub_path, "_corpus.json"), 'r') as f:
+            corpus_data = json.load(f)
+        config = corpus_data["config"]
+        vocab = corpus_data["vocab"]
+        meta = pd.DataFrame(corpus_data["metadata"])
+        
+        # reconstruct keep_docs using document indices in JSON dtm
+        keep_docs = [len(idx) > 0 for idx in corpus_data["dtm"]["indices"]]
+        keep_docs = pd.Series(keep_docs)
+
+        true_theta = pd.DataFrame(corpus_data["true_thetas"])[keep_docs].reset_index(drop=True)
+        true_beta_overall = pd.DataFrame(corpus_data["true_betas"]["overall"])
+
+        meta = meta[keep_docs].reset_index(drop=True)
+        
+        # calculate actual observed Gini of the corpus proportions dynamically
+        observed_proportions = true_theta.mean(axis=0).tolist()
+        observed_gini = gini_coeff(observed_proportions)
+        
+    except Exception as e:
+        print(f"Skipping {dir_tag}: Missing or invalid unified corpus JSON ({e})")
         continue
 
-    for sub in os.listdir(gini_path):
-        sub_path = os.path.join(gini_path, sub)
-        if not os.path.isdir(sub_path):
-            continue
+    # load SearchK logs (global simulation-level log)
+    fits_path = os.path.join(sub_path, "model_fits")
+    try:
+        global_search_log = pd.read_csv(os.path.join(fits_path, "simulation_master_log.csv")).iloc[0].to_dict()
+    except:
+        global_search_log = {}
 
-        print(f"Processing: {gini_folder} -> {sub}")
+    # determine number of model fits
+    run_nums = [d.strip('run_') for d in os.listdir(fits_path) if (os.path.isdir(os.path.join(fits_path, d)) and d.startswith('run_'))]
 
-        # 1. Load Ground Truth
-        try:
-            config = json.load(open(os.path.join(sub_path, "_config.json")))
-            dtm = pd.read_csv(os.path.join(sub_path, "_dtm.csv"))
-            vocab = dtm.columns.tolist()
+    # evaluation
+    for model in MODELS:
+        is_deterministic = (model == "lsi") or (model == "stm" and os.path.exists(os.path.join(fits_path, "stm_theta.csv")))
+        runs_to_check = [None] if is_deterministic else run_nums
 
-            keep_docs = dtm.sum(axis=1) > 0
+        for run in runs_to_check:
+            try:
+                current_path = os.path.join(fits_path, f"run_{run}") if run else fits_path
+                
+                # run-specific SearchK metrics if they exist (stochastic search_k), otherwise fallback to global log
+                run_metrics_path = os.path.join(current_path, "searchK_metrics.json")
+                if os.path.exists(run_metrics_path):
+                    with open(run_metrics_path, 'r') as f:
+                        search_log = json.load(f)
+                else:
+                    search_log = global_search_log
 
-            true_theta = pd.read_csv(os.path.join(sub_path, "_true_thetas.csv"))[keep_docs].reset_index(drop=True)
-            true_beta_overall = pd.read_csv(os.path.join(sub_path, "_true_beta_overall.csv"))[vocab]
+                # Dynamic vocab alignment: identifying the active vocabulary that was actually fitted in the R model
+                if model == "stm":
+                    counts = meta['content_covar'].value_counts(normalize=True)
+                    rep_group = list(counts.index)[0]
+                    rep_file = os.path.join(current_path, f"stm_beta_group_{rep_group}.csv")
+                    if not os.path.exists(rep_file):
+                        rep_file = os.path.join(current_path, f"stm_beta_group_{float(rep_group)}.csv")
+                else:
+                    rep_file = os.path.join(current_path, f"{model}_beta_overall.csv")
 
-            meta = pd.read_csv(os.path.join(sub_path, "_meta.csv"))[keep_docs]
-        except Exception as e:
-            print(f"Skipping {sub}: Missing GT files ({e})")
-            continue
+                if not os.path.exists(rep_file):
+                    raise FileNotFoundError(f"Representative beta file {rep_file} not found.")
 
-        # 2. Load SearchK Logs
-        fits_path = os.path.join(sub_path, "model_fits")
-        try:
-            search_log = pd.read_csv(os.path.join(fits_path, "simulation_master_log.csv")).iloc[0].to_dict()
-        except:
-            search_log = {}
+                fitted_cols = pd.read_csv(rep_file, nrows=0).columns.tolist()
+                active_vocab = [w for w in vocab if w in fitted_cols]
+                vocab_indices = [vocab.index(w) for w in active_vocab]
 
-        # 3. Evaluate Models
-        for model in MODELS:
-            is_lsi = (model == "lsi")
-            runs_to_check = [None] if is_lsi else range(1, N_RUNS + 1)
+                # filter ground truth parameters to active vocabulary space
+                true_beta_subset = true_beta_overall.values[:, vocab_indices]
 
-            for run in runs_to_check:
-                try:
-                    current_path = os.path.join(fits_path, f"run_{run}") if run else fits_path
+                if model == "stm":
+                    # STM weighted averaging of group betas
+                    counts = meta['content_covar'].value_counts(normalize=True)
+                    f_beta = None
 
-                    if model == "stm":
-                        # STM requires weighted averaging of group betas
-                        counts = meta['content_covar'].value_counts(normalize=True)
-                        f_beta = None
+                    # overall topic beta for stm - weighted average of group-specific betas
+                    for group_id, weight in counts.items():
+                        file_name = f"stm_beta_group_{group_id}.csv"
+                        file_path = os.path.join(current_path, file_name)
+                        if not os.path.exists(file_path):
+                            # float representation just in case
+                            file_name = f"stm_beta_group_{float(group_id)}.csv"
+                            file_path = os.path.join(current_path, file_name)
+                            
+                        if not os.path.exists(file_path):
+                            raise FileNotFoundError(f"Fitted STM beta file not found for group {group_id} under {current_path}")
+                            
+                        g_beta = pd.read_csv(file_path)[active_vocab].values
+                        if f_beta is None:
+                            f_beta = np.zeros_like(g_beta)
+                        f_beta += g_beta * weight
 
-                        # overall topic beta for stm  TODO: calculate separately
-                        for group_id, weight in counts.items():
-                            g_beta = pd.read_csv(os.path.join(current_path, f"stm_beta_group_{group_id}.csv"))[
-                                vocab].values
-                            if f_beta is None:
-                                f_beta = np.zeros_like(g_beta)
-                            f_beta += g_beta * weight
+                    f_theta = pd.read_csv(os.path.join(current_path, "stm_theta.csv"))
 
-                        f_theta = pd.read_csv(os.path.join(current_path, "stm_theta.csv"))
+                else:
+                    f_beta = pd.read_csv(os.path.join(current_path, f"{model}_beta_overall.csv"))[active_vocab].values
 
+                    if is_deterministic:
+                        f_theta = None if model == "lsi" else pd.read_csv(os.path.join(current_path, f"{model}_theta.csv"))
                     else:
-                        f_beta = pd.read_csv(os.path.join(current_path, f"{model}_beta_overall.csv"))[vocab].values
+                        f_theta = pd.read_csv(os.path.join(current_path, f"{model}_theta.csv"))
 
-                        if is_lsi:
-                            f_theta = None
-                        else:
-                            f_theta = pd.read_csv(os.path.join(current_path, f"{model}_theta.csv"))
+                # calculaate evaluation metrics
+                eval_metrics = evaluate_fit(true_beta_subset, f_beta, true_theta, f_theta, active_vocab)
 
-                    # Perform Evaluation
-                    eval_metrics = evaluate_fit(true_beta_overall.values, f_beta, true_theta, f_theta, vocab)
+                row = {
+                    "dir_tag": dir_tag,
+                    "prop_gini_coeff": round(observed_gini * 100),
+                    "generation_mode": config.get("generation_mode", "stm"),
+                    "min_word_freq": config.get("min_word_freq", 1),
+                    "model": model.upper(),
+                    "run": run if run else 1,
+                    **eval_metrics
+                }
 
-                    # Consolidate Row
-                    row = {
-                        "gini_folder": gini_folder,
-                        "prop_gini_coeff": 0 if gini_folder == 'base_corp' else int(gini_folder.split('_')[-1]),
-                        "generation_mode": "markov" if "markov" in sub else "stm",
-                        "min_word_freq": 5 if "freq5" in sub else 1,
-                        "model": model.upper(),
-                        "run": run if run else 1,
-                        **eval_metrics
-                    }
+                # adding searchK metrics
+                row.update({k: v for k, v in search_log.items() if "Elbow" in k or "Final" in k})
+                # config params
+                row.update({k: v for k, v in config.items() if isinstance(v, (int, float, str))})
 
-                    row.update({k: v for k, v in search_log.items() if "Elbow" in k or "Final" in k})
-                    row.update({k: v for k, v in config.items() if isinstance(v, (int, float, str))})
+                master_data.append(row)
 
-                    master_data.append(row)
+            except Exception as e:
+                print(f"Error evaluating {model} in {dir_tag} run {run if run else 'deterministic'}: {e}")
 
-                except Exception as e:
-                    print(f"Error evaluating {model} in {sub} run {run}: {e}")
-
-df_master = pd.DataFrame(master_data)
-df_master.to_csv(f"{BASE_PATH}/prop_simulation_results.csv", index=False)
+if master_data:
+    df_master = pd.DataFrame(master_data)
+    output_csv = os.path.join(BASE_PATH, "prop_simulation_results.csv")
+    df_master.to_csv(output_csv, index=False)
+    msg = f"All evaluations complete! Saved master result table of length {len(df_master)} to {output_csv}"
+    print(msg)
+    log_pipeline_event(BASE_PATH, "evaluation", "finish", msg)
+else:
+    print("No evaluations completed successfully.")
+    log_pipeline_event(BASE_PATH, "evaluation", "failure", "No evaluations completed successfully.")
