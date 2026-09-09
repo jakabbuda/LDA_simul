@@ -17,7 +17,7 @@ Supports parallel corpus generation and model fitting on multiple CPU cores (`co
   - Implements the generative model described in the article *Structural Topic Models for Open-Ended Survey Responses* (Roberts et al., 2014)
 - **Markov Mode (`generation_mode: "markov"`)**:
   - Simulates documents as sequential Markov chains across topics using a transition matrix $M$.
-  - Computes exact stationary distributions $\pi = \text{markov\_stationary}(M)$ for initial topic assignment.
+  - Computes exact stationary distributions for initial topic assignment.
   - Supports group-specific transition dynamics under prevalence covariate shifts.
 
 ### 2. Noise and imbalance synthesis
