@@ -1,0 +1,148 @@
+{
+    "base_parameters": {
+        "n_docs": 1000,
+        "num_topics": 5,
+        "vocab_size_per_topic": 100,
+        "text_len_params": {
+            "lam": 100
+        },
+        "prev_effect_size": 1.0,
+        "cont_effect_size": 0.5,
+        "stopword_ratio": 0.0,
+        "overlap_ratio": 0.0,
+        "unstandard_ratio": 0.0,
+        "topic_signal_boost": 5.0,
+        "store_documents": false
+    },
+    "grid_parameters": {
+        "generation_mode": [
+            "stm",
+            "markov"
+        ],
+        "min_word_freq": [
+            1,
+            5
+        ],
+        "topic_imbalance": [
+            {
+                "gini": 0,
+                "topic_proportions": [
+                    0.2,
+                    0.2,
+                    0.2,
+                    0.2,
+                    0.2
+                ],
+                "markov_transition_probs": [
+                    0.98,
+                    0.98,
+                    0.98,
+                    0.98,
+                    0.98
+                ]
+            },
+            {
+                "gini": 12,
+                "topic_proportions": [
+                    0.26822778,
+                    0.22352315,
+                    0.19159127,
+                    0.16764236,
+                    0.14901543
+                ],
+                "markov_transition_probs": [
+                    0.98,
+                    0.976,
+                    0.972,
+                    0.968,
+                    0.964
+                ]
+            },
+            {
+                "gini": 14,
+                "topic_proportions": [
+                    0.28263795,
+                    0.22611036,
+                    0.1884253,
+                    0.1615074,
+                    0.14131898
+                ],
+                "markov_transition_probs": [
+                    0.98,
+                    0.975,
+                    0.97,
+                    0.965,
+                    0.96
+                ]
+            },
+            {
+                "gini": 19,
+                "topic_proportions": [
+                    0.32164661,
+                    0.22974758,
+                    0.17869256,
+                    0.14620301,
+                    0.12371024
+                ],
+                "markov_transition_probs": [
+                    0.98,
+                    0.972,
+                    0.964,
+                    0.956,
+                    0.948
+                ]
+            },
+            {
+                "gini": 22,
+                "topic_proportions": [
+                    0.34482759,
+                    0.22988506,
+                    0.17241379,
+                    0.13793103,
+                    0.11494253
+                ],
+                "markov_transition_probs": [
+                    0.98,
+                    0.97,
+                    0.96,
+                    0.95,
+                    0.94
+                ]
+            },
+            {
+                "gini": 32,
+                "topic_proportions": [
+                    0.4379562,
+                    0.2189781,
+                    0.1459854,
+                    0.10948905,
+                    0.08759124
+                ],
+                "markov_transition_probs": [
+                    0.98,
+                    0.96,
+                    0.94,
+                    0.92,
+                    0.9
+                ]
+            },
+            {
+                "gini": 44,
+                "topic_proportions": [
+                    0.55950266,
+                    0.18650089,
+                    0.11190053,
+                    0.07992895,
+                    0.06216696
+                ],
+                "markov_transition_probs": [
+                    0.98,
+                    0.94,
+                    0.90,
+                    0.86,
+                    0.82
+                ]
+            }
+        ]
+    }
+}
