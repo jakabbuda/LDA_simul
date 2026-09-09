@@ -4,6 +4,7 @@ Sys.setenv(MKL_NUM_THREADS = "1")
 Sys.setenv(OPENBLAS_NUM_THREADS = "1")
 Sys.setenv(VECLIB_MAXIMUM_THREADS = "1")
 Sys.setenv(NUMEXPR_NUM_THREADS = "1")
+Sys.setenv(R_PARALLEL_PORT = "random")
 
 library(stm)
 library(topicmodels)
@@ -25,6 +26,170 @@ if (requireNamespace("RhpcBLASctl", quietly = TRUE)) {
   RhpcBLASctl::blas_set_num_threads(1)
   RhpcBLASctl::omp_set_num_threads(1)
 }
+
+# Safe sequential implementation of ldatuning::FindTopicsNumber to avoid process colision when running multiple cores
+# This replacement evaluates the LDA models sequentially via lapply and calculates the exact same metrics.
+safe_Arun2010 <- function(models, dtm) {
+  len <- slam::row_sums(dtm)
+  sapply(models, function(model) {
+    if (is.null(model)) return(NA_real_)
+    tryCatch({
+      m1 <- exp(model@beta)
+      m1.svd <- svd(m1)
+      cm1 <- as.matrix(m1.svd$d)
+      m2 <- model@gamma
+      cm2 <- len %*% m2
+      norm <- norm(as.matrix(len), type = "m")
+      cm2 <- as.vector(cm2 / norm)
+      # When k > V (number of topics exceeds vocabulary size), SVD yields min(k, V) = V singular values,
+      # whereas cm2 has length k. In Arun (2010), both distributions must have length k.
+      # We pad cm1 with small epsilon values to avoid subscript mismatch:
+      if (length(cm1) != length(cm2)) {
+        if (length(cm1) < length(cm2)) {
+          cm1 <- c(as.vector(cm1), rep(.Machine$double.eps, length(cm2) - length(cm1)))
+          cm1 <- cm1 / sum(cm1)
+        } else {
+          return(NA_real_)
+        }
+      }
+      divergence <- sum(cm1 * log(cm1 / cm2)) + sum(cm2 * log(cm2 / cm1))
+      return(divergence)
+    }, error = function(e) NA_real_)
+  })
+}
+
+FindTopicsNumber <- function(dtm, topics = seq(10, 40, by = 10),
+                             metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+                             method = "Gibbs", control = list(), mc.cores = NA,
+                             return_models = FALSE, verbose = FALSE, libpath = NULL) {
+  if (length(topics[topics < 2]) != 0) {
+    if (verbose) cat("warning: topics count can't to be less than 2, incorrect values was removed.\n")
+    topics <- topics[topics >= 2]
+  }
+  topics <- sort(topics, decreasing = TRUE)
+  if ("Griffiths2004" %in% metrics) {
+    if (method == "VEM") {
+      if (verbose) cat("'Griffiths2004' is incompatible with 'VEM' method, excluded.\n")
+      metrics <- setdiff(metrics, "Griffiths2004")
+    } else {
+      if (!"keep" %in% names(control)) 
+        control <- c(control, keep = 50)
+    }
+  }
+  if (verbose) cat("fit models...")
+  models <- lapply(topics, function(x) {
+    if (!is.null(libpath)) {
+      .libPaths(libpath)
+    }
+    tryCatch(
+      topicmodels::LDA(dtm, k = x, method = method, control = control),
+      error = function(e) NULL
+    )
+  })
+  if (verbose) cat(" done.\n")
+  if (verbose) cat("calculate metrics:\n")
+  if (return_models && requireNamespace("tibble", quietly = TRUE)) {
+    result <- cbind(topics, tibble::enframe(models, value = "LDA_model"))
+    result$name <- NULL
+  } else {
+    if (return_models) {
+      message("The tibble package is required for returning models. Returning results only.")
+    }
+    result <- data.frame(topics)
+  }
+  for (m in metrics) {
+    if (verbose) cat(sprintf("  %s...", m))
+    if (!m %in% c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014")) {
+      cat(" unknown!\n")
+    } else {
+      res_m <- tryCatch({
+        switch(m,
+          Griffiths2004 = ldatuning::Griffiths2004(models, control),
+          CaoJuan2009   = ldatuning::CaoJuan2009(models),
+          Arun2010      = safe_Arun2010(models, dtm),
+          Deveaud2014   = ldatuning::Deveaud2014(models),
+          NaN
+        )
+      }, error = function(e) {
+        rep(NA_real_, length(topics))
+      })
+      if (length(res_m) != length(topics)) {
+        res_m <- rep(NA_real_, length(topics))
+      }
+      result[m] <- res_m
+      if (verbose) cat(" done.\n")
+    }
+  }
+  return(result)
+}
+
+# Safe implementation of stm::searchK
+# Upstream stm::searchK hardcodes M = 10 for exclusivity() and semanticCoherence() metrics.
+# When a corpus has small vocabulary (e.g. fewer than 10 terms after min_word_freq filtering or heldout sampling),
+# exclusivity() and semanticCoherence() attempt to slice [1:M, ] on the beta matrix, triggering:
+# 'Error in (function (cond) : error in evaluating the argument 'x' in selecting a method for function 'mean': subscript out of bounds'
+# Furthermore, if M < 2 or vocabulary is too small, matrix slicing dimensions collapse.
+# This replacement dynamically bounds M to the heldout vocabulary size and provides graceful fallbacks.
+searchK <- function(documents, vocab, K, init.type = "Spectral",
+                    N = floor(0.1 * length(documents)), proportion = 0.5,
+                    heldout.seed = NULL, M = 10, cores = 1, ...) {
+  heldout <- stm::make.heldout(documents, vocab, N = N, proportion = proportion, seed = heldout.seed)
+  v_heldout <- length(heldout$vocab)
+  effective_M <- min(as.integer(M), as.integer(v_heldout))
+  
+  if ("content" %in% names(list(...))) {
+    warning("Exclusivity calculation only designed for models without content covariates", call. = FALSE)
+  }
+  
+  g <- list()
+  for (i in seq_along(K)) {
+    k <- K[i]
+    if (v_heldout < 2 || effective_M < 2) {
+      model <- tryCatch(
+        stm::stm(documents = heldout$documents, vocab = heldout$vocab, K = k, init.type = init.type, ...),
+        error = function(e) NULL
+      )
+      out <- list(
+        K = k,
+        exclus = NA_real_,
+        semcoh = NA_real_,
+        heldout = if (!is.null(model)) stm::eval.heldout(model, heldout$missing)$expected.heldout else NA_real_,
+        residual = if (!is.null(model)) stm::checkResiduals(model, heldout$documents)$dispersion else NA_real_,
+        bound = if (!is.null(model)) max(model$convergence$bound) else NA_real_,
+        lbound = if (!is.null(model)) max(model$convergence$bound) + lfactorial(k) else NA_real_,
+        em.its = if (!is.null(model)) length(model$convergence$bound) else 0L
+      )
+      g[[i]] <- out
+    } else {
+      stat <- tryCatch(
+        stm:::get_statistics(k, heldout = heldout, init.type = init.type, M = effective_M, ...),
+        error = function(e) {
+          model <- tryCatch(
+            stm::stm(documents = heldout$documents, vocab = heldout$vocab, K = k, init.type = init.type, ...),
+            error = function(e2) NULL
+          )
+          list(
+            K = k,
+            exclus = NA_real_,
+            semcoh = NA_real_,
+            heldout = if (!is.null(model)) stm::eval.heldout(model, heldout$missing)$expected.heldout else NA_real_,
+            residual = if (!is.null(model)) stm::checkResiduals(model, heldout$documents)$dispersion else NA_real_,
+            bound = if (!is.null(model)) max(model$convergence$bound) else NA_real_,
+            lbound = if (!is.null(model)) max(model$convergence$bound) + lfactorial(k) else NA_real_,
+            em.its = if (!is.null(model)) length(model$convergence$bound) else 0L
+          )
+        }
+      )
+      g[[i]] <- stat
+    }
+  }
+  g <- do.call("rbind", g)
+  g <- as.data.frame(g)
+  toreturn <- list(results = g, call = match.call(expand.dots = TRUE))
+  class(toreturn) <- "searchK"
+  return(toreturn)
+}
+
 
 
 log_pipeline_event <- function(base_path, phase, status, message) {
@@ -144,10 +309,16 @@ get_consensus_k <- function(x) {
   max_freq <- max(freq_table)
   modes <- as.numeric(names(freq_table)[freq_table == max_freq])
 
-  if (length(modes) == 1) {
-    return(modes)
+  if (max_freq > 1) {
+    if (length(modes) == 1) {
+      return(modes)
+    } else {
+      # If multiple modes exist, pick mode closest to their median
+      med_modes <- median(modes)
+      return(modes[which.min(abs(modes - med_modes))])
+    }
   } else {
-    return(floor(median(x)))  # fallback to median
+    return(floor(median(x)))  # fallback to median when no mode exists
   }
 }
 
@@ -290,12 +461,16 @@ run_full_eval <- function(simul_name,
     master_log_path <- file.path(path_prefix_save, "simulation_master_log.csv")
     if (file.exists(master_log_path)) {
       cat(paste0("  [Skip Step] Global SearchK logs for ", simul_name, " are complete. Loading parameters...\n"))
-      master_log <- fread(master_log_path)
+      master_log <- tryCatch(read.csv(master_log_path, stringsAsFactors = FALSE), error = function(e) fread(master_log_path))
       best_k_lda_global <- as.numeric(master_log$Final_Consensus_K_LDA[1])
       best_k_stm_global <- as.numeric(master_log$Final_Consensus_K_STM[1])
+      if (is.na(best_k_lda_global) || length(best_k_lda_global) == 0) best_k_lda_global <- true_k
+      if (is.na(best_k_stm_global) || length(best_k_stm_global) == 0) best_k_stm_global <- true_k
       best_k_lda_run1 <- best_k_lda_global
       log_pipeline_event(base_path, "fitting", "skipped", paste0("global SearchK logs loaded from master_log for ", simul_name))
     } else {
+      cat(paste0("  [", simul_name, "] Running STM searchK across K = [", paste(k_range, collapse = ", "), "]...\n"))
+      flush.console()
       # global STM searchK once outside the loop
       k_results_stm <- searchK(
         stm_data$documents, stm_data$vocab, K = k_range,
@@ -316,6 +491,8 @@ run_full_eval <- function(simul_name,
       gc(verbose = FALSE)
 
       # traditional global Search K for LDA
+      cat(paste0("  [", simul_name, "] Running LDA FindTopicsNumber across K = [", paste(k_range, collapse = ", "), "]...\n"))
+      flush.console()
       k_results_lda <- FindTopicsNumber(
         dtm_matrix, topics = k_range,
         metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
@@ -361,6 +538,8 @@ run_full_eval <- function(simul_name,
       cat(paste0("  [Skip Step] STM fit is already complete. Skipping...\n"))
       log_pipeline_event(base_path, "fitting", "skipped", paste0("STM skipped for ", simul_name))
     } else {
+      cat(paste0("  [", simul_name, "] Fitting STM (K = ", best_k_stm_global, ")...\n"))
+      flush.console()
       # Fit STM once globally
       m_stm <- stm(
         documents = stm_data$documents, vocab = stm_data$vocab, K = best_k_stm_global,
@@ -409,9 +588,11 @@ run_full_eval <- function(simul_name,
           if (file.exists(run_metrics_path)) {
             run_metrics <- fromJSON(run_metrics_path)
             best_k_lda_run1 <- as.numeric(run_metrics$Final_Consensus_K_LDA)
+            if (is.na(best_k_lda_run1) || length(best_k_lda_run1) == 0) best_k_lda_run1 <- true_k
           }
         } else {
           best_k_lda_run1 <- best_k_lda_global
+          if (is.na(best_k_lda_run1) || length(best_k_lda_run1) == 0) best_k_lda_run1 <- true_k
         }
       }
       next
@@ -492,12 +673,33 @@ run_full_eval <- function(simul_name,
     }
     
     # LDA
-    m_lda <- LDA(dtm_matrix, k = current_best_k_lda, method = "Gibbs")
+    # current_seed <- as.integer(42 + run * 1000)
+    cat(paste0("  [", simul_name, "] Run ", run, "/", n_runs, ": Fitting LDA Gibbs (k=", current_best_k_lda, ")...\n"))
+    flush.console()
+    m_lda <- LDA(
+      dtm_matrix, k = current_best_k_lda, method = "Gibbs",
+      # control = list(seed = current_seed, iter = 1000, burnin = 100)
+      control = list(iter = 1000, burnin = 100)
+    )
     write.csv(posterior(m_lda)$topics, paste0(run_dir, "/lda_theta.csv"), row.names = FALSE)
     write.csv(posterior(m_lda)$terms, paste0(run_dir, "/lda_beta_overall.csv"), row.names = FALSE)
     
     # CTM
-    m_ctm <- CTM(dtm_matrix, k = current_best_k_lda)
+    cat(paste0("  [", simul_name, "] Run ", run, "/", n_runs, ": Fitting CTM (k=", current_best_k_lda, ")...\n"))
+    flush.console()
+    ctm_control <- list(
+      # seed = current_seed,
+      em = list(iter.max = 500, tol = 1e-3),
+      var = list(iter.max = 250, tol = 1e-4),
+      cg = list(iter.max = 250, tol = 1e-4)
+    )
+    m_ctm <- tryCatch({
+      CTM(dtm_matrix, k = current_best_k_lda, control = ctm_control)
+    }, error = function(e) {
+      warning(paste0("CTM fit warning on run ", run, " for ", simul_name, ": ", e$message, ". Retrying with basic VEM..."))
+      # CTM(dtm_matrix, k = current_best_k_lda, method = "VEM", control = list(seed = current_seed, em = list(iter.max = 100)))
+      CTM(dtm_matrix, k = current_best_k_lda, method = "VEM", control = list(em = list(iter.max = 500)))
+    })
     write.csv(posterior(m_ctm)$topics, paste0(run_dir, "/ctm_theta.csv"), row.names = FALSE)
     write.csv(posterior(m_ctm)$terms, paste0(run_dir, "/ctm_beta_overall.csv"), row.names = FALSE)
     
@@ -512,7 +714,13 @@ run_full_eval <- function(simul_name,
     log_pipeline_event(base_path, "fitting", "skipped", paste0("LSI skipped for ", simul_name))
   } else {
     # LSI
-    m_lsa <- lsa(t(dtm_matrix), dims = best_k_lda_run1)
+    k_lsi <- best_k_lda_run1
+    if (is.na(k_lsi) || length(k_lsi) == 0) k_lsi <- true_k
+    max_lsi_dims <- max(1, min(nrow(dtm_matrix), ncol(dtm_matrix)) - 1)
+    k_lsi <- max(1, min(as.integer(k_lsi), as.integer(max_lsi_dims)))
+    cat(paste0("  [", simul_name, "] Fitting LSI (dims = ", k_lsi, ")...\n"))
+    flush.console()
+    m_lsa <- lsa(t(dtm_matrix), dims = k_lsi)
     write.csv(m_lsa$dk, paste0(path_prefix_save, "/lsi_theta.csv"), row.names = FALSE)
     write.csv(t(m_lsa$tk), paste0(path_prefix_save, "/lsi_beta_overall.csv"), row.names = FALSE)
     log_pipeline_event(base_path, "fitting", "success", paste0("LSI fit complete for ", simul_name))
@@ -604,6 +812,10 @@ if (num_cores > 1) {
         RhpcBLASctl::blas_set_num_threads(1)
         RhpcBLASctl::omp_set_num_threads(1)
       }
+      if (exists("defaultClusterOptions", envir = asNamespace("parallel"))) {
+        # Randomize default cluster port to prevent collisions if any package attempts to spawn a PSOCK cluster
+        try(assign("port", sample(11500:29000, 1), envir = parallel:::defaultClusterOptions), silent = TRUE)
+      }
       
       sim_name <- dirname(corpus_file)
       if (sim_name != ".") {
@@ -677,7 +889,24 @@ if (num_cores > 1) {
           log_pipeline_event(base_data_path, "fitting", "success", paste0("Completed fits for simulation ", sim_name, " in ", duration, "s"))
         }
       }
+      return(TRUE)
     }, mc.cores = num_cores)
+    
+    # Check for child process errors
+    failed_indices <- which(sapply(results, function(res) inherits(res, "try-error") || is.null(res)))
+    if (length(failed_indices) > 0) {
+      for (idx in failed_indices) {
+        err <- results[[idx]]
+        file_name <- corpus_files[idx]
+        if (inherits(err, "try-error")) {
+          warning(paste0("Worker for '", file_name, "' failed with error: ", as.character(err)))
+        } else if (is.null(err)) {
+          warning(paste0("Worker for '", file_name, "' terminated abnormally or was killed (e.g. OOM/crash)."))
+        }
+      }
+      log_pipeline_event(base_data_path, "fitting", "failure", paste(length(failed_indices), "parallel fitting worker(s) failed."))
+      stop(paste(length(failed_indices), "parallel fitting worker(s) failed with errors."))
+    }
     
   } else {
     # Fallback to standard sockets for Windows
@@ -687,7 +916,7 @@ if (num_cores > 1) {
     # Run evaluations in parallel
     foreach(corpus_file = corpus_files, 
             .packages = c("stm", "topicmodels", "ldatuning", "lsa", "data.table", "jsonlite", "kneedle"),
-            .export = c("run_full_eval", "find_elbow_kneedle", "find_elbow", "get_consensus_k")) %dopar% {
+            .export = c("run_full_eval", "find_elbow_kneedle", "find_elbow", "get_consensus_k", "FindTopicsNumber", "safe_Arun2010", "searchK")) %dopar% {
       
       # Redundant assurance
       Sys.setenv(OMP_NUM_THREADS = "1")
