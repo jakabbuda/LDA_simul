@@ -44,6 +44,13 @@ class CorpusConfig:
 
         if self.text_len_params is None:
             self.text_len_params = {"lam": 100}
+        elif isinstance(self.text_len_params, (int, float)):
+            self.text_len_params = {"lam": int(self.text_len_params)}
+        elif isinstance(self.text_len_params, list):
+            self.text_len_params = [
+                {"lam": int(x)} if isinstance(x, (int, float)) else x
+                for x in self.text_len_params
+            ]
         self.n_docs = self._to_list(self.n_docs)
         self.num_topics_list = self._to_list(self.num_topics)
         self.len_params = self._to_list(self.text_len_params)
@@ -59,6 +66,8 @@ class CorpusConfig:
                 raise ValueError(f"parameter '{param_name}' must have length {self.n_subcorpora} to match n_docs")
 
         # Covariate imbalance validation
+        self.n_groups_prev = int(self.n_groups_prev)
+        self.n_groups_cont = int(self.n_groups_cont)
         if self.prev_covar_imbal is not None:
             if len(self.prev_covar_imbal) != self.n_groups_prev:
                 raise ValueError(f"prev_covar_imbal should have one value for each prevalence covariate group: {self.n_groups_prev=}")
@@ -213,18 +222,23 @@ class SyntheticCorpus:
                 topic_map[t1][i_t1] = topic_map[t2][i_t2] = shared
 
         # Expand for unstandardization (not sufficient lemmatization / stemming)
+        # Determine variants at unique word level so shared words retain the exact same variants
+        word_to_variants = {}
+        unique_words = sorted(list(set(w for words in topic_map.values() for w in words)))
+        for w in unique_words:
+            if np.random.random() < self.unstd_ratio:
+                v_count = np.random.randint(2, max_variants + 1)
+                word_to_variants[w] = [f"{w}_v{v}" for v in range(v_count)]
+            else:
+                word_to_variants[w] = [w]
+
         final_map = {t: [] for t in range(max_t)}
         all_symbols = []
         for t, words in topic_map.items():
             for w in words:
-                if np.random.random() < self.unstd_ratio:
-                    v_count = np.random.randint(2, max_variants + 1)
-                    variants = [f"{w}_v{v}" for v in range(v_count)]
-                    final_map[t].extend(variants)
-                    all_symbols.extend(variants)
-                else:
-                    final_map[t].append(w)
-                    all_symbols.append(w)
+                variants = word_to_variants[w]
+                final_map[t].extend(variants)
+                all_symbols.extend(variants)
 
         # stopwords
         stopwords = []
@@ -278,6 +292,20 @@ class SyntheticCorpus:
                 self.markov_matrices.append(perturbed_m)
                 self.markov_stationary.append(markov_stationary(perturbed_m))
 
+        self._recompute_cached_distributions()
+
+    def _recompute_cached_distributions(self):
+        max_t = max(self.num_topics_list)
+        self.betas = np.zeros((max_t, self.n_groups_cont, self.v_size))
+        for t in range(max_t):
+            for g in range(self.n_groups_cont):
+                self.betas[t, g] = self._get_beta(t, g)
+
+        self.stopword_probs = None
+        if self.stopword_ratio > 0 and self.stopwords:
+            stopword_indices = [self.word_to_idx[s] for s in self.stopwords]
+            self.stopword_probs = softmax(self.m[stopword_indices])
+
     def _get_beta(self, t_idx, g_idx):
         # log_evidence(word v, topic k): score_v=m_v + kappa_k,v + kappa_g,v
         log_beta = self.m + self.kappa_k[t_idx] + self.kappa_kg[t_idx, g_idx % self.n_groups_cont]
@@ -288,6 +316,8 @@ class SyntheticCorpus:
         return softmax(log_beta)
 
     def _generate_doc(self, n_t, g_p, g_c, length, M):
+        max_t = max(self.num_topics_list)
+        theta = np.zeros(max_t)
         if self.mode == 'stm':
             meta_p = np.zeros(self.n_groups_prev)
             meta_p[g_p] = 1
@@ -295,8 +325,9 @@ class SyntheticCorpus:
             mean_vec = np.dot(self.gamma[:n_t, :], meta_p) + self.base_mu[:n_t]  # expected topic distr in group
             cov_mat = self.sigma[:n_t, :n_t]
             eta = np.random.multivariate_normal(mean_vec, cov_mat)  # actual topic distr (log)
-            theta = softmax(eta)
-            doc_topic_list = np.random.choice(n_t, size=length, p=theta)
+            sub_theta = softmax(eta)
+            theta[:n_t] = sub_theta
+            doc_topic_list = np.random.choice(n_t, size=length, p=sub_theta)
         else:  # markov
             stat_dist = self.markov_stationary[g_p][:n_t]
             stat_dist = stat_dist / stat_dist.sum()
@@ -304,19 +335,14 @@ class SyntheticCorpus:
             for _ in range(length - 1):
                 p = M[doc_topic_list[-1]][:n_t] / M[doc_topic_list[-1]][:n_t].sum()
                 doc_topic_list.append(np.random.choice(n_t, p=p))
-            theta = np.bincount(doc_topic_list, minlength=n_t) / length
+            theta[:n_t] = np.bincount(doc_topic_list, minlength=n_t) / length
 
         doc = []
-        stopword_indices = [self.word_to_idx[s] for s in self.stopwords]
-        stopword_probs = []
-        if self.stopword_ratio > 0:
-            stopword_probs = softmax(self.m[stopword_indices])
-
         for ti in doc_topic_list:
             if self.stopword_ratio > 0 and np.random.random() < self.stopword_ratio:
-                doc.append(np.random.choice(self.stopwords, p=stopword_probs))
+                doc.append(np.random.choice(self.stopwords, p=self.stopword_probs))
             else:
-                doc.append(np.random.choice(self.full_vocab, p=self._get_beta(ti, g_c)))
+                doc.append(np.random.choice(self.full_vocab, p=self.betas[ti, g_c % self.n_groups_cont]))
         return doc, theta
 
     def _synthesize(self):
@@ -348,6 +374,8 @@ class SyntheticCorpus:
         self.v_size = len(self.full_vocab)
         self.word_to_idx = {w: i for i, w in enumerate(self.full_vocab)}
         self.stopwords = [s for s in self.stopwords if s in to_keep]
+        self.topic_to_symbols = {t: [w for w in words if w in to_keep] for t, words in self.topic_to_symbols.items()}
+        self._recompute_cached_distributions()
 
     def get_gold_standard(self):
         """
