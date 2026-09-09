@@ -10,7 +10,8 @@ def markov_stationary(mtrx):
     if not np.isclose(mtrx.sum(axis=1), 1).all():
         raise ValueError(f"rowsums should be 1 but are {mtrx.sum(axis=1)}")
     evals, evecs = np.linalg.eig(mtrx.T)
-    evec1 = evecs[:, np.isclose(evals, 1.0)].flatten().real  # eigenvector for eigenvalue == 1
+    idx = np.argmin(np.abs(evals - 1.0))
+    evec1 = evecs[:, idx].flatten().real  # eigenvector for eigenvalue == 1
     stat_dist = evec1 / evec1.sum()
     # resolve numerical precision issue
     stat_dist = np.clip(stat_dist, 0, None)
@@ -80,3 +81,61 @@ def generate_proportions_with_gini_and_bounds(n, target_gini, min_val=0.01):
     )
 
     return [float(np.round(i, 6)) for i in sorted(result.x, reverse=True)]
+
+
+PREFIX_MAP = {
+    "ndocs": "n_docs",
+    "generationmode": "generation_mode",
+    "stopwordratio": "stopword_ratio",
+    "minwordfreq": "min_word_freq",
+    "gini": "target_gini",
+    "overlapratio": "overlap_ratio",
+    "unstandardratio": "unstandard_ratio",
+    "numtopics": "num_topics",
+    "vocabsizepertopic": "vocab_size_per_topic",
+    "preveffectsize": "prev_effect_size",
+    "conteffectsize": "cont_effect_size",
+    "topiccovar": "topic_covar",
+    "doclen": "doc_len",
+    "textlen": "doc_len",
+    "ngroupsprev": "n_groups_prev",
+    "ngroupscont": "n_groups_cont"
+}
+
+
+def parse_dir_tag(dir_tag):
+    """
+    Parses directory paths/tags to a dictionary of parameter names and typed values.
+    """
+    extracted = {}
+    parts = str(dir_tag).replace("\\", "/").split("/")
+    for part in parts:
+        subparts = part.split("_")
+        i = 0
+        while i < len(subparts):
+            sp = subparts[i]
+            for prefix, col in sorted(PREFIX_MAP.items(), key=lambda x: -len(x[0])):
+                clean_sp = sp.replace("_", "").lower()
+                if clean_sp.startswith(prefix):
+                    remainder = clean_sp[len(prefix):]
+                    if len(remainder) > 0:
+                        val_str = remainder
+                    elif i + 1 < len(subparts):
+                        val_str = subparts[i + 1]
+                        i += 1
+                    else:
+                        continue
+                    
+                    val_str = val_str.replace("p", ".")
+                    try:
+                        if "." in val_str:
+                            val = float(val_str)
+                        else:
+                            val = int(val_str)
+                    except ValueError:
+                        val = val_str
+                    extracted[col] = val
+                    break
+            i += 1
+    return extracted
+
