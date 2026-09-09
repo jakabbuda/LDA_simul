@@ -97,7 +97,13 @@ def run_config_simulation(config_data, output_base, config_path, num_cores=1):
             else:
                 t_probs = np.array(imbal.get("markov_transition_probs"))
                 merged_params["markov_matrix"] = make_uncorrelated_markov(t_probs)
+            merged_params["target_gini"] = gini_val
             del merged_params["topic_imbalance"]
+            
+        if "doc_len" in merged_params:
+            merged_params["text_len_params"] = {"lam": int(merged_params["doc_len"])}
+        elif "doc_length" in merged_params:
+            merged_params["text_len_params"] = {"lam": int(merged_params["doc_length"])}
             
         output_dir = os.path.join(output_base, "single_run")
         worker_generate_single_run(merged_params, output_dir, config_path, "single", "run", output_base)
@@ -129,39 +135,41 @@ def run_config_simulation(config_data, output_base, config_path, num_cores=1):
         merged_params = {**base_params, **current_grid_params}
         
         # Handle conditional 'topic_imbalance' compound structure
-        mrm = None
-        tp = None
         gini_val = 0
-        
         if "topic_imbalance" in current_grid_params:
             imbal = current_grid_params["topic_imbalance"]
             gini_val = imbal.get("gini", 0)
             
             if merged_params.get("generation_mode") == "stm":
-                tp = imbal.get("topic_proportions")
+                merged_params["topic_proportions"] = imbal.get("topic_proportions")
             else:
                 t_probs = np.array(imbal.get("markov_transition_probs"))
-                mrm = make_uncorrelated_markov(t_probs)
+                merged_params["markov_matrix"] = make_uncorrelated_markov(t_probs)
                 
+            merged_params["target_gini"] = gini_val
             del merged_params["topic_imbalance"]
-            
-        merged_params["topic_proportions"] = tp
-        merged_params["markov_matrix"] = mrm
+
+        if "doc_len" in merged_params:
+            merged_params["text_len_params"] = {"lam": int(merged_params["doc_len"])}
+        elif "doc_length" in merged_params:
+            merged_params["text_len_params"] = {"lam": int(merged_params["doc_length"])}
         
         # folder name
-        if grouping_key == "topic_imbalance":
-            group_folder = f"gini_{gini_val}"
-        else:
-            val = str(current_grid_params[grouping_key]).replace('.', 'p')
-            group_folder = f"{grouping_key.replace('_', '')}{val}"
+        def format_folder_name(key, val_dict):
+            if key == "topic_imbalance":
+                return f"gini_{gini_val}"
+            raw_val = val_dict[key]
+            if key in ("text_len_params", "doc_len", "doc_length"):
+                lam_val = raw_val.get("lam", raw_val) if isinstance(raw_val, dict) else raw_val
+                return f"doclen{lam_val}"
+            clean_val = str(raw_val).replace('.', 'p')
+            return f"{key.replace('_', '')}{clean_val}"
+
+        group_folder = format_folder_name(grouping_key, current_grid_params)
             
         subgroup_parts = []
         for sk in subgroup_keys:
-            if sk == "topic_imbalance":
-                subgroup_parts.append(f"gini_{gini_val}")
-            else:
-                val = str(current_grid_params[sk]).replace('.', 'p')
-                subgroup_parts.append(f"{sk.replace('_', '')}{val}")
+            subgroup_parts.append(format_folder_name(sk, current_grid_params))
                 
         subgroup_folder = "_".join(subgroup_parts) if subgroup_parts else "run"
         output_dir = os.path.join(output_base, group_folder, subgroup_folder)
@@ -198,12 +206,21 @@ def run_config_simulation(config_data, output_base, config_path, num_cores=1):
     log_pipeline_event(output_base, "generation", "finish", "Corpus generation pipeline completed.")
 
 def generate_single_run(params, output_dir, config_path):
+    t_len = params.get("text_len_params")
+    if t_len is None:
+        if "doc_len" in params:
+            t_len = {"lam": int(params["doc_len"])}
+        elif "doc_length" in params:
+            t_len = {"lam": int(params["doc_length"])}
+    elif isinstance(t_len, (int, float)):
+        t_len = {"lam": int(t_len)}
+
     corpus = SyntheticCorpus(
         n_docs=params.get("n_docs"),
         num_topics=params.get("num_topics"),
         vocab_size_per_topic=params.get("vocab_size_per_topic"),
         text_len_dist=params.get("text_len_dist", np.random.poisson),
-        text_len_params=params.get("text_len_params"),
+        text_len_params=t_len,
         generation_mode=params.get("generation_mode", "stm"),
         n_groups_prev=params.get("n_groups_prev", 2),
         n_groups_cont=params.get("n_groups_cont", 2),
