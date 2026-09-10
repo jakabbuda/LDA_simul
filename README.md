@@ -262,3 +262,39 @@ python3 src/run_pipeline.py --step evaluate  --base_path simul_data/
 python3 src/run_pipeline.py --step visualize --base_path simul_data/
 ```
 
+---
+
+## Multi-Corpus Simulation Pipeline (`run_pipeline_multiple_simul.py`)
+
+To eliminate simulation noise and measure model performance across multiple independent corpus sampling for each grid point, use `run_pipeline_multiple_simul.py`:
+
+```bash
+python3 src/run_pipeline_multiple_simul.py \
+    --step all \
+    --config path/to/config.json \
+    --base_path simul_multi/ \
+    --n_parallel_corpus 5 \
+    --n_runs 1 \
+    --cores 4 \
+    --keep_corpora false \
+    --keep_models false
+```
+
+### Key Parameters:
+- `--n_parallel_corpus`: Number of independent synthetic corpora generated for each grid point (default: `1`).
+- `--n_runs`: Number of stochastic model fits (LDA, CTM) on each corpus (default: `1`).
+- `--keep_corpora`: Whether to keep `_corpus.json` files after fitting (default: `True`). Set `--no_keep_corpora` or `--keep_corpora false` to delete the heavy corpus files and minimize disk usage (ground truth parameters are automatically preserved in `_ground_truth.json` for evaluations).
+- `--keep_models`: Whether to keep fitted model parameter CSVs after evaluation (default: `True`). Set `--no_keep_models` or `--keep_models false` to delete the heavy matrix CSVs.
+- **Resumption**: Automatically checks whether each iteration is already completed, resuming cleanly from interruptions.
+- **Output**:
+  - Merges evaluation metrics into `base_path/prop_simulation_results.csv`.
+  - Produces `searchK_metric_accuracy_summary.csv` and `plot_3_SearchK_deviation_heatmap.png`.
+  - Renders `prop_simulation_results_RBO_*.png` and `prop_simulation_results_RMSE_*.png` displaying the empirical mean lines and standard deviation shaded error bands across all parallel corpora.
+  - Also outputs individual plots in each `sim_*/` directory for per-iteration inspection.
+- If `--n_parallel_corpus 1` is run without multi-corpus settings, execution runs directly in `base_path` identically to `run_pipeline.py`.
+
+---
+
+## Funding:
+
+> <img src="img/ekop-logo-rgb-horizontal_color%20angol.png" alt="EKOP-LOGO" width="150" align=right> SUPPORTED BY THE EKÖP-25 UNIVERSITY EXCELLENCE SCHOLARSHIP PROGRAM OF THE MINISTRY FOR CULTURE AND INNOVATION FROM THE SOURCE OF THE NATIONAL RESEARCH, DEVELOPMENT AND INNOVATION FUND.
